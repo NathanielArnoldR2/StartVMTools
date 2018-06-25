@@ -1,0 +1,332 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <!-- GENERAL - NULLABLES AND NOT-EMPTIES -->
+  <xs:simpleType name="boolean_nullable">
+    <xs:union>
+      <xs:simpleType>
+        <xs:restriction base='xs:string'>
+          <xs:length value='0'/>
+        </xs:restriction>
+      </xs:simpleType>
+      <xs:simpleType>
+        <xs:restriction base='xs:boolean' />
+      </xs:simpleType>
+    </xs:union>
+  </xs:simpleType>
+  <xs:simpleType name="string_notEmpty">
+    <xs:restriction base='xs:string'>
+      <xs:minLength value='1'/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!--
+  PowerShell Direct Credential Resolution for Action[@Type=Config]
+
+  1) If credentials are attached directly to the Action, those will be used.
+  
+  2) Otherwise credentials will be taken from the target's Member entry in the
+     ActionSet.Members list, if defined there.
+
+  3) Otherwise credentials will be taken from the target's Member entry in the
+     Configuration.Members list, if defined there.
+
+  4) Otherwise credentials will be taken from the toolset's default credential
+     store, if defined there.
+  -->
+
+  <!-- CONFIGURATION -->
+  <xs:element name="Configuration">
+    <xs:complexType>
+      <xs:sequence>
+        <!--
+        Not configurable. Set to the basename of the .xml or .ps1 file
+        hosting the configuration after it is loaded, and just before
+        schema validation.
+        -->
+        <xs:element name="Name" type="string_notEmpty" />
+        <!--
+        Each ActionSet requires a list of one or more Members, at least one of
+        which must be Required. If the Member list attached to the ActionSet
+        itself is empty, the ActionSet will inherit this list, if not empty;
+        otherwise, resource resolution will fail.
+        -->
+        <xs:element name="Members" type="Members_Type"/>
+        <xs:element name="ActionSets">
+          <xs:complexType>
+            <xs:sequence>
+              <!-- 
+              A configuration may contain no more than one ActionSet for each
+              context. Hence, no more than 4 total.
+              -->
+              <xs:element name="ActionSet" type="ActionSet_Type" minOccurs="1" maxOccurs="4" />
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+
+  <!-- CREDENTIAL DEFINITION -->
+  <!--
+  These are barely validated, as they have only a single use case, and full
+  suitability for that use case cannot be ascertained in advance. They will
+  either work, or they won't.
+  -->
+  <xs:complexType name="Credential_Type">
+      <xs:attribute name="UserName" use="required" type="string_notEmpty" />
+      <xs:attribute name="Password" use="required" type="string_notEmpty" /> 
+  </xs:complexType>
+
+  <!-- MEMBERS & RELATED DEFINITIONS -->
+  <xs:complexType name="Members_Type">
+    <xs:sequence>
+      <xs:element name="Member" type="Member_Type" minOccurs="0" maxOccurs="4"/>
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="Member_Type">
+    <xs:sequence>
+      <xs:element name="Credential" type="Credential_Type" minOccurs="0"/>
+    </xs:sequence>
+    <!--
+    Barely validated, as it is only used to target a vm for management. It
+    either works for that purpose, or it doesn't.
+    -->
+    <xs:attribute name="Name" use="required" type="string_notEmpty" />
+    <!--
+    DEFAULT: Via PowerShell configuration command, 'true'. 'false' is indicated
+             by a switch parameter '-Optional'.
+    -->
+    <xs:attribute name="Required" use="required" type="xs:boolean" />
+  </xs:complexType>
+
+  <!-- ACTIONSET DEFINITION -->
+  <xs:complexType name="ActionSet_Type">
+    <xs:sequence>
+      <xs:element name="Members" type="Members_Type" />
+      <xs:element name="Actions">
+        <xs:complexType>
+          <xs:sequence>
+            <!-- Limitation on action count here is purely arbitrary. -->
+            <xs:element name="Action" type="Action_Type" minOccurs="1" maxOccurs="10" />
+          </xs:sequence>
+        </xs:complexType>
+      </xs:element>
+    </xs:sequence>
+    <xs:attribute name="Context" use="required">
+      <xs:simpleType>
+        <xs:restriction base="xs:string">
+          <xs:enumeration value="Config" />
+          <xs:enumeration value="Start" />
+          <xs:enumeration value="Test" />
+          <xs:enumeration value="Update" />
+        </xs:restriction>
+      </xs:simpleType>
+    </xs:attribute>
+    <!--
+    VALIDITY:
+      - A value specified here (via the corresponding switch in the PowerShell
+        configuration command) is only relevant and valid for an ActionSet of
+        context 'Start'. Specifying a value in any other context is invalid.
+    DEFAULT:
+      - Via XSLT-equivalent PowerShell, 'n/a' where ActionSet.Context -ne
+        'Start'.
+      - Otherwise 'false', as 'true' puts constraints on what constitutes a
+        valid class-ready configuration, being incompatible with (e.g.) AutoLogon.
+    -->
+    <xs:attribute name="UseEnhancedSessionMode" type="boolean_nullable" />
+  </xs:complexType>
+
+  <!-- ACTION DEFINITIONS - ABSTRACT & COMPONENT -->
+  <xs:complexType name="Action_Type" abstract="true" />
+  <xs:complexType name="ActionSingleTarget_Type" abstract="true">
+    <xs:complexContent>
+      <xs:extension base="Action_Type">
+        <xs:attribute name="Target" use="required" type="xs:string" />
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="RestoreCheckpointAction_CheckpointMap_Type">
+    <xs:sequence>
+      <!--
+      VALIDITY:
+        - Exactly one Target must be defined for each ActionSet Member. Members
+          are "targeted" using the TargetName attribute.
+      -->
+      <xs:element name="CheckpointMapItem" type="RestoreCheckpointAction_CheckpointMapItem_Type" minOccurs="1" maxOccurs="4" />
+    </xs:sequence>
+  </xs:complexType>
+  <xs:complexType name="RestoreCheckpointAction_CheckpointMapItem_Type">
+    <!--
+    VALIDITY:
+      - Must be the name of an ActionSet Member.
+      - Names may not be repeated in a single RestoreCheckpoint action.
+    -->
+    <xs:attribute name="Target" type="string_notEmpty" />
+    <!--
+    VALIDITY:
+      - An identifier for a checkpoint defined for the ActionSet Member vm. If
+        empty, signifies the (sole) top checkpoint for that vm; otherwise, a
+        checkpoint with a name of the following form, which must exist, or
+        resource resolution will fail.
+        
+        'Class-Ready Configuration (Name)'
+    -->
+    <xs:attribute name="CheckpointName" type="xs:string" />
+  </xs:complexType>
+
+  <!-- ACTION DEFINITIONS - CONCRETE -->
+  <xs:complexType name="RestoreCheckpointAction">
+    <xs:complexContent>
+      <xs:extension base="Action_Type">
+        <xs:choice>
+          <xs:element name="CheckpointMap" type="RestoreCheckpointAction_CheckpointMap_Type" />
+          <!--
+          VALIDITY:
+            - A shorthand for a applying a single checkpoint identifier (as
+              defined above) to all ActionSet Members. Is validated on the
+              same terms; in fact, this shorthand is transitioned to the
+              'CheckpointMap' structure/syntax for full validation to
+              available resources after schema validation is done.
+          -->
+          <xs:element name="CheckpointName" type="xs:string" />
+        </xs:choice>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="StartAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <!-- 
+          DEFAULT:
+            - Via PowerShell configuration command, 'true'.
+          -->
+          <xs:element name="WaitForHeartbeat" type="xs:boolean" />
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="InjectAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <!--
+          VALIDITY:
+          - Difficult/Impossible to validate.
+          -->
+          <xs:element name="Script" type="xs:string" />
+          <!-- 
+          DEFAULT:
+          - Via PowerShell configuration command, 'false'.
+          -->
+          <xs:element name="UsePhysHostName" type="xs:boolean" />
+          <!-- 
+          DEFAULT:
+          - Via PowerShell configuration command, 'false'; the configuration is
+            finished as soon as the script terminates.
+          -->
+          <xs:element name="WaitForKvp" type="xs:boolean" />
+          <!-- 
+          DEFAULT:
+          - Via XSLT-equivalent PowerShell, 'false' unless any packages are
+            defined, otherwise 'true', as the package construct requires a
+            resource server connection.
+          VALIDITY:
+          - If packages are defined, value *must not* be 'false'.
+          -->
+          <xs:element name="UseResourceServer" type="boolean_nullable" />
+          <xs:element name="Packages">
+            <xs:complexType>
+              <xs:sequence>
+                <!--
+                VALIDITY:
+                - Packages available on ClsCfgSvr cannot be readily ascertained
+                  in this context. Therefore, only bare filename validity will
+                  be checked for. If failure happens, it will be as packages
+                  are being retrieved.
+                -->
+                <xs:element name="Package" type="string_notEmpty" minOccurs="0" maxOccurs="6" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+          <xs:element name="Credential" type="Credential_Type" minOccurs="0" maxOccurs="1" />
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="StopAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+
+  <xs:complexType name="CustomAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <!--
+          VALIDITY:
+          - Difficult/Impossible to validate.
+          -->
+          <xs:element name="Script" type="xs:string" />
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="ConfigHwAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <xs:element name="ProcessorCount" type="xs:unsignedByte" minOccurs="0" maxOccurs="1"/>
+          <xs:element name="MemoryBytes" type="xs:unsignedLong" minOccurs="0" maxOccurs="1"/>
+          <xs:element name="NetworkAdapters" minOccurs="0" maxOccurs="1">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="NetworkAdapter" type="string_notEmpty" minOccurs="0" maxOccurs="2" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+
+  <xs:complexType name="TakeCheckpointAction">
+    <xs:complexContent>
+      <xs:extension base="Action_Type">
+        <xs:sequence>
+          <xs:element name="CheckpointName" type="string_notEmpty" />          
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+
+  <xs:complexType name="ConfigRdpAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <xs:element name="Clear" type="xs:boolean" />
+          <xs:element name="Config" type="xs:boolean" />
+          <xs:element name="RedirectAudio" type="boolean_nullable" />
+          <xs:element name="RedirectMicrophone" type="boolean_nullable" />
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="ConnectAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+
+  <xs:complexType name="CleanAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="ReplaceCheckpointAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+</xs:schema>

@@ -1,0 +1,101 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <!-- GENERAL - NULLABLES AND NOT-EMPTIES -->
+  <xs:simpleType name="string_notEmpty">
+    <xs:restriction base='xs:string'>
+      <xs:minLength value='1'/>
+    </xs:restriction>
+  </xs:simpleType>
+
+  <!-- CONFIGURATION -->
+  <xs:element name="Configuration">
+    <xs:complexType>
+      <xs:sequence>
+        <!--
+        DEFAULT:
+          - Via PowerShell configuration cmdlet, 'true'. HOWEVER, this setting
+            will only be honored by Invoke-StartVM if two sources of evidence
+            agree the toolset is being run from an external drive:
+              - Presence of the "DismountToolsetDrive" module in the global
+                scope, as imported by the controlling script.
+              - A module-scope $PSScriptRoot value that suggests placement in
+                the standard path for modules hosted on external drives.
+        -->
+        <xs:element name="AutoEject" type="xs:boolean" />
+        <!--
+        VALIDITY:
+          - On their own merits, each item is given cursory validation as a
+            valid file-system name (the same criteria used to validate
+            LoadBuilder VM Names).
+          - If the selected ActionSet has a required member with name -eq
+            'default', at least one item in the list must match the name
+            of a vm on the virtualization host. Otherwise an error will
+            be thrown.
+        -->
+        <xs:element name="DefaultMemberOptions">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="DefaultMemberOption" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!--
+        DEFAULT:
+          - Via PowerShell configuration cmdlet, 'false'.
+        -->
+        <xs:element name="IgnoreNonMembers" type="xs:boolean" />
+        <!--
+        VALIDITY:
+          - On their own merits, each item is given cursory validation as a
+            valid file-system name (the same criteria used to validate
+            LoadBuilder VM Names).
+          - If the selected ActionSet attempts to target any of these items
+            as a member, an error will be thrown.
+        -->
+        <xs:element name="IgnoreList">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="IgnoreListItem" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!--
+        DEFAULT:
+          - 'false'. The actual host computer host name is truncated if needed
+            and passed to the VM for interior configuration.
+        VALIDITY:
+          - The default 'false', of course.
+          - 'true', indicating the console user should be prompted for a valid
+            computer name.
+          - A non-empty string, which (after the console user confirms) is
+            passed to the interior configuration as the host computer
+            host name.
+        -->
+        <xs:element name="PhysHostNameOverride" type="string_notEmpty" />
+        <!--
+        VALIDITY:
+          - Each item is validated as an IPv4 address or computer name.
+        -->
+        <xs:element name="ResourceServerOptions">
+          <xs:complexType>
+            <xs:sequence>
+              <xs:element name="ResourceServerOption" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+            </xs:sequence>
+          </xs:complexType>
+        </xs:element>
+        <!--
+        DEFAULT:
+          - Via PowerShell configuration cmdlet, 'true'.
+        -->
+        <xs:element name="TestResourceShares" type="xs:boolean" />
+        <!--
+        DEFAULT:
+          - Via PowerShell configuration cmdlet, 'true'. The controlling script
+            is solely responsible for detecting and honoring a 'false' value
+            where applicable, however.
+        -->
+        <xs:element name="AutoExit" type="xs:boolean" />
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>
