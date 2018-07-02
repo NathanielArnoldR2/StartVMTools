@@ -1,3 +1,9 @@
+$credScript = {
+  Resolve-StartVMActionsConfiguration_Credential -Node $node
+}
+
+rule -Individual /Configuration/Members/Member $credScript
+
 rule -Individual /Configuration/ActionSets/ActionSet/Members/Member {
   if ($node.Name -in $RuntimeConfig.DisallowedMemberNames) {
     throw "An actionset may not reference by name any vm in the ToolsetConfig IgnoreList or DefaultMemberOptions."
@@ -39,7 +45,8 @@ rule -Individual /Configuration/ActionSets/ActionSet/Members/Member {
     $node.SetAttribute("VMId", $vms[0].Id)
   }
 }
+rule -Individual /Configuration/ActionSets/ActionSet/Members/Member $credScript
 
-rule -Individual "Configuration/ActionSets/ActionSet/Actions/Action" {
+rule -Individual /Configuration/ActionSets/ActionSet/Actions/Action {
   Resolve-StartVMActionsConfiguration_EachAction -Action $node
 }

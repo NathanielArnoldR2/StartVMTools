@@ -27,16 +27,6 @@ $constrainedString = {
     throw "Value failed 'Test-Path -IsValid' validity failsafe."
   }
 }
-$userName = {
-  if ($nodeValue.Length -ne $nodeValue.Trim().Length) {
-    throw "Value had leading or trailing whitespace."
-  }
-}
-$password = {
-  if ($nodeValue.Length -ne $nodeValue.Trim().Length) {
-    throw "Value had leading or trailing whitespace."
-  }
-}
 $uniqueness = {
   $uniqueValues = @(
     $nodeListValues |
@@ -65,56 +55,6 @@ $memberRequiredAtLeastOne = {
   }
 }
 
-$credInheritPrereq = {
-  $null -eq $node.Credential
-}
-$credInherit = {
-  $credOptions = @()
-
-  # @TODO Separate handling for "Action" w/o explicit target is needed because
-  # of logic FAULT caused by shifting code around, as resolving an empty action
-  # target now happens during resolution steps. Most correct fix would probably
-  # be to move the credential inheritance code to resolution steps as well.
-  if ($node.LocalName -eq "Member") {
-    $memberName = $node.Name
-  }
-  elseif ($node.LocalName -eq "Action" -and $node.Target.Length -gt 0) {
-    $memberName = $node.Target
-  }
-  elseif ($node.LocalName -eq "Action") {
-    $memberName = $node.SelectSingleNode("../../Members/Member").Name
-  }
-
-  # 'Inject' Action resolves up to ActionSet Member
-  $credOptions += $node.SelectNodes("../../Members/Member") |
-                    Where-Object Name -eq $memberName |
-                    ForEach-Object Credential
-
-  # 'Inject' Action or ActionSet Member resolves up to Configuration Member
-  $credOptions += $node.SelectNodes("../../../../Members/Member") |
-                    Where-Object Name -eq $memberName |
-                    ForEach-Object Credential
-
-  # Any context will take a Fallback Credential.
-  $credOptions += $script:resources.FallbackCredentials |
-                    Where-Object MemberName -eq $memberName
-
-  $cred = $credOptions |
-            Where-Object {$_ -ne $null} |
-            Select-Object -First 1
-
-  if ($cred -ne $null) {
-    $credNode = $node.AppendChild(
-      $node.
-      OwnerDocument.
-      CreateElement("Credential")
-    )
-
-    $credNode.SetAttribute("UserName", $cred.UserName)
-    $credNode.SetAttribute("Password", $cred.Password)
-  }
-}
-
 $configRdpNullables = {
   $config = $node.SelectSingleNode("..").Config
 
@@ -140,14 +80,6 @@ rule -Aggregate /Configuration/Members/Member/@Required `
   $nodeListValues.Count -gt 0
 } `
      -Script $memberRequiredAtLeastOne
-
-# Inherit credential from FallbackCredentials, if needed.
-rule -Individual /Configuration/Members/Member `
-     -PrereqScript $credInheritPrereq `
-     -Script $credInherit
-
-rule -Individual /Configuration/Members/Member/Credential/@UserName $userName
-rule -Individual /Configuration/Members/Member/Credential/@Password $password
 #endregion
 
 rule -Aggregate /Configuration/ActionSets/ActionSet/@Context $uniqueness
@@ -197,14 +129,6 @@ foreach ($i_actionSet in 1..$actionSetCount) {
   rule -Aggregate /Configuration/ActionSets/ActionSet[$i_actionSet]/Members/Member/@Name $uniqueness
   rule -Aggregate /Configuration/ActionSets/ActionSet[$i_actionSet]/Members/Member/@Required $memberRequiredAtLeastOne
 }
-
-# Inherit credential from Configuration or FallbackCredentials, if needed.
-rule -Individual /Configuration/ActionSets/ActionSet/Members/Member `
-     -PrereqScript $credInheritPrereq `
-     -Script $credInherit
-
-rule -Individual /Configuration/ActionSets/ActionSet/Members/Member/Credential/@UserName $userName
-rule -Individual /Configuration/ActionSets/ActionSet/Members/Member/Credential/@Password $password
 
 #endregion
 
@@ -309,15 +233,6 @@ rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='
   MaxLength = 30
 }
 
-# -- INHERIT Inject Credential if needed.
-rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='InjectAction']" `
-     -PrereqScript $credInheritPrereq `
-     -Script $credInherit
-
-# -- VALIDATE Inject Credential
-rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='InjectAction']/Credential/@UserName" $userName
-rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='InjectAction']/Credential/@Password" $password
-
 rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='ConfigHwAction']/ProcessorCount" `
      -Script {
   # Via schema, already validated as unsigned byte; for validity, then, we
@@ -341,6 +256,9 @@ rule -Individual "Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='C
 }
 
 rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='TakeCheckpointAction']/CheckpointName" `
+     -PrereqScript {
+  $nodeValue.Length -gt 0
+} `
      -Script $constrainedString `
      -Params @{
   Pattern   = "^[A-Za-z0-9 ]+$"
@@ -429,6 +347,10 @@ rule -Individual /Configuration/ActionSets/ActionSet {
     if ($actions[$actions.Count - 1].type -ne "TakecheckpointAction") {
       throw "The last action of a 'Config' context actionset must be a TakeCheckpoint action."
     }
+
+    if ($actions[$actions.Count - 1].CheckpointName.Length -eq 0) {
+      throw "The TakeCheckpoint action in a 'Config' context actionset must specify a checkpoint name."
+    }
   }
 
   if ($node.Context -eq "Start") {
@@ -453,6 +375,62 @@ rule -Individual /Configuration/ActionSets/ActionSet {
 
     if ($actions[0].type -ne "RestoreCheckpointAction") {
       throw "The first action of a 'Start' context actionset must be a RestoreCheckpoint action."
+    }
+
+    if ($actions[$actions.Count - 1].type -ne "ConnectAction") {
+      throw "The last action of a 'Start' context actionset must be a Connect action."
+    }
+  }
+
+  if ($node.Context -eq "Save") {
+    $allowedTypes = @(
+      "SaveIfNeededAction"
+      "TakeCheckpointAction"
+    )
+
+    $badActions = @(
+      $actions |
+        Where-Object type -notin $allowedTypes
+    )
+
+    if ($badActions.Count -gt 0) {
+      throw "The 'Config' actionset contained one or more actions of a type inappropriate for its context."
+    }
+
+    if ($actions[$actions.Count - 1].type -ne "TakecheckpointAction") {
+      throw "The last action of a 'Save' context actionset must be a TakeCheckpoint action."
+    }
+  }
+
+  if ($node.Context -eq "Restore") {
+    $allowedTypes = @(
+      "RestoreCheckpointAction"
+      "ConfigRdpAction"
+      "StartAction"
+      "InjectAction"
+      "ConnectAction"
+    )
+
+    $badActions = @(
+      $actions |
+        Where-Object type -notin $allowedTypes
+    )
+
+    if ($badActions.Count -gt 0) {
+      throw "The 'Start' actionset contained one or more actions of a type inappropriate for its context."
+    }
+
+    if ($actions[0].type -ne "RestoreCheckpointAction") {
+      throw "The first action of a 'Start' context actionset must be a RestoreCheckpoint action."
+    }
+
+    $restoreToTop = @(
+      $actions[0].CheckpointMap.CheckpointMapItem.CheckpointName |
+        Where-Object Length -eq 0
+    )
+
+    if ($restoreToTop.Count -gt 0) {
+      throw "The RestoreCheckpoint action in a 'Restore' context actionset must not restore the top checkpoint."
     }
 
     if ($actions[$actions.Count - 1].type -ne "ConnectAction") {

@@ -232,7 +232,14 @@ function Add-StartVMActionSet {
     [Parameter(
       Mandatory = $true
     )]
-    [ValidateSet("Config", "Start", "Test", "Update")]
+    [ValidateSet(
+      "Config",
+      "Start",
+      "Test",
+      "Save",
+      "Restore",
+      "Update"
+    )]
     [string]
     $Context,
 
@@ -423,6 +430,98 @@ function New-StartVMRestoreCheckpointAction {
   [PSCustomObject]$outHash
 }
 New-Alias -Name act_restoreCheckpoint -Value New-StartVMRestoreCheckpointAction
+function New-StartVMCleanAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Target
+  )
+  [PSCustomObject]@{
+    PSTypeName       = "StartVMAction"
+    Type             = "CleanAction"
+    Target           = $Target
+  }
+}
+New-Alias -Name act_clean -Value New-StartVMCleanAction
+
+function New-StartVMConfigHwAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Target,
+
+    [byte]
+    $ProcessorCount,
+
+    [long]
+    $MemoryBytes,
+
+    [AllowEmptyCollection()]
+    [string[]]
+    $NetworkAdapters
+  )
+
+  $outHash = [ordered]@{
+    PSTypeName        = "StartVMAction"
+    Type              = "ConfigHwAction"
+    Target            = $Target
+  }
+
+  if ($PSBoundParameters.ContainsKey("ProcessorCount")) {
+    $outHash.ProcessorCount = $ProcessorCount
+  }
+
+  if ($PSBoundParameters.ContainsKey("MemoryBytes")) {
+    $outHash.MemoryBytes = $MemoryBytes
+  }
+
+  if ($PSBoundParameters.ContainsKey("NetworkAdapters")) {
+    $outHash.NetworkAdapters = $NetworkAdapters
+  }
+
+  [PSCustomObject]$outHash
+}
+New-Alias -Name act_configHw -Value New-StartVMConfigHwAction
+function New-StartVMCustomAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Target,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Script
+  )
+  [PSCustomObject]@{
+    PSTypeName        = "StartVMAction"
+    Type              = "CustomAction"
+    Target            = $Target
+    Script            = $Script
+  }
+}
+New-Alias -Name act_custom -Value New-StartVMCustomAction
+
 function New-StartVMStartAction {
   [CmdletBinding(
     PositionalBinding = $false
@@ -446,6 +545,7 @@ function New-StartVMStartAction {
   }
 }
 New-Alias -Name act_start -Value New-StartVMStartAction
+
 function New-StartVMInjectAction {
   [CmdletBinding(
     PositionalBinding = $false
@@ -506,116 +606,7 @@ function New-StartVMInjectAction {
   [PSCustomObject]$outHash
 }
 New-Alias -Name act_inject -Value New-StartVMInjectAction
-function New-StartVMStopAction {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Position = 0
-    )]
-    [ValidateNotNullOrEmpty()]
-    [string]
-    $Target
-  )
-  [PSCustomObject]@{
-    PSTypeName       = "StartVMAction"
-    Type             = "StopAction"
-    Target           = $Target
-  }
-}
-New-Alias -Name act_stop -Value New-StartVMStopAction
-function New-StartVMCustomAction {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Position = 0
-    )]
-    [ValidateNotNullOrEmpty()]
-    [string]
-    $Target,
 
-    [Parameter(
-      Mandatory = $true
-    )]
-    [ValidateNotNullOrEmpty()]
-    [string]
-    $Script
-  )
-  [PSCustomObject]@{
-    PSTypeName        = "StartVMAction"
-    Type              = "CustomAction"
-    Target            = $Target
-    Script            = $Script
-  }
-}
-New-Alias -Name act_custom -Value New-StartVMCustomAction
-function New-StartVMConfigHwAction {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Position = 0
-    )]
-    [ValidateNotNullOrEmpty()]
-    [string]
-    $Target,
-
-    [byte]
-    $ProcessorCount,
-
-    [long]
-    $MemoryBytes,
-
-    [AllowEmptyCollection()]
-    [string[]]
-    $NetworkAdapters
-  )
-
-  $outHash = [ordered]@{
-    PSTypeName        = "StartVMAction"
-    Type              = "ConfigHwAction"
-    Target            = $Target
-  }
-
-  if ($PSBoundParameters.ContainsKey("ProcessorCount")) {
-    $outHash.ProcessorCount = $ProcessorCount
-  }
-
-  if ($PSBoundParameters.ContainsKey("MemoryBytes")) {
-    $outHash.MemoryBytes = $MemoryBytes
-  }
-
-  if ($PSBoundParameters.ContainsKey("NetworkAdapters")) {
-    $outHash.NetworkAdapters = $NetworkAdapters
-  }
-
-  [PSCustomObject]$outHash
-}
-New-Alias -Name act_configHw -Value New-StartVMConfigHwAction
-function New-StartVMTakeCheckpointAction {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Mandatory = $true,
-      Position  = 0
-    )]
-    [ValidateNotNullOrEmpty()]
-    [string]
-    $CheckpointName
-  )
-  [PSCustomObject]@{
-    PSTypeName        = "StartVMAction"
-    Type              = "TakeCheckpointAction"
-    CheckpointName    = $CheckpointName
-  }
-}
-New-Alias -Name act_takeCheckpoint -Value New-StartVMTakeCheckpointAction
 function New-StartVMConfigRdpAction {
   [CmdletBinding(
     DefaultParameterSetName = "Config",
@@ -690,7 +681,8 @@ function New-StartVMConnectAction {
   }
 }
 New-Alias -Name act_connect -Value New-StartVMConnectAction
-function New-StartVMCleanAction {
+
+function New-StartVMSaveIfNeededAction {
   [CmdletBinding(
     PositionalBinding = $false
   )]
@@ -704,11 +696,50 @@ function New-StartVMCleanAction {
   )
   [PSCustomObject]@{
     PSTypeName       = "StartVMAction"
-    Type             = "CleanAction"
+    Type             = "SaveIfNeededAction"
     Target           = $Target
   }
 }
-New-Alias -Name act_clean -Value New-StartVMCleanAction
+New-Alias -Name act_saveIfNeeded -Value New-StartVMSaveIfNeededAction
+function New-StartVMStopAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Target
+  )
+  [PSCustomObject]@{
+    PSTypeName       = "StartVMAction"
+    Type             = "StopAction"
+    Target           = $Target
+  }
+}
+New-Alias -Name act_stop -Value New-StartVMStopAction
+function New-StartVMTakeCheckpointAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position  = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $CheckpointName
+  )
+  [PSCustomObject]@{
+    PSTypeName        = "StartVMAction"
+    Type              = "TakeCheckpointAction"
+    CheckpointName    = $CheckpointName
+  }
+}
+New-Alias -Name act_takeCheckpoint -Value New-StartVMTakeCheckpointAction
+
 function New-StartVMReplaceCheckpointAction {
   [CmdletBinding(
     PositionalBinding = $false

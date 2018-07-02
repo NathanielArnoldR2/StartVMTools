@@ -1,12 +1,5 @@
 <#
 
-@TODO: Remove direct child Members node from Configuration node.
-
-The frequency with which members and member properties (Optional, Credentials)
-shift per-actionset within a single configuration renders the configuration-
-level "Members" node less useful, particularly as no more than 2 or 3 separate
-actionsets will ever share the same configuration.
-
 @TODO: Shift credential inheritance from Validity to Readiness.
 
 For conceptual and practical reasons, credential inheritance is better placed
@@ -364,6 +357,8 @@ function Select-StartVMActionSetContext {
     "Config"
     "Start"
     "Test"
+    "Save"
+    "Restore"
     "Update"
   )
 
@@ -824,6 +819,18 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
 
   $context = $Action.SelectSingleNode("../..").Context
 
+  $goodSnapshotStates = @(
+    "Off"
+  )
+
+  if ($context -eq "Start") {
+    $checkpointNameBase = "Class-Ready Configuration"
+  }
+  elseif ($context -eq "Restore") {
+    $checkpointNameBase = "Mid-Class Configuration"
+    $goodSnapshotStates += "Saved"
+  }
+
   foreach ($item in $Action.SelectNodes("CheckpointMap/CheckpointMapItem")) {
     $member = $Members |
                 Where-Object Name -eq $item.Target
@@ -838,31 +845,45 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
         Get-VMSnapshot
     )
 
-    if ($item.CheckpointName.Length -eq 0) {
-      $msgAug = "top"
-
+    if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config") {
       $targetSnapshot = @(
         $vmSnapshots |
           Where-Object ParentSnapshotId -eq $null
       )
     }
     elseif ($context -eq "Start") {
-      $msgAug = "'$($item.CheckpointName)'"
-
-      $snapshotName = "Class-Ready Configuration ($($item.CheckpointName))"
-
       $targetSnapshot = @(
         $vmSnapshots |
-          Where-Object Name -eq $snapshotName
+          Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
       )
+    }
+    elseif ($context -eq "Restore") {
+      $targetSnapshot = @(
+        $vmSnapshots |
+          Where-Object ParentSnapshotName -eq "Class-Ready Configuration ($($item.CheckpointName))" |
+          Where-Object Name -eq $checkpointNameBase
+      )
+
+      if ($targetSnapshot.Count -eq 0) {
+        $targetSnapshot = @(
+          $vmSnapshots |
+            Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
+        )
+      }
     }
 
     if ($targetSnapshot.Count -ne 1) {
-      throw "Expected to find exactly one checkpoint matching specification ($msgAug) for member '$($member.Name)', but found $($targetSnapshot.Count)."
+      throw "Expected to find exactly one checkpoint matching '$context' '$($item.CheckpointName)' specification for member '$($member.Name)', but found $($targetSnapshot.Count)."
+    }
+
+    $targetSnapshot = $targetSnapshot[0]
+
+    if ($targetSnapshot.State -notin $goodSnapshotStates) {
+      throw "Targeted snapshot had invalid state '$($targetSnapshot.State)'."
     }
 
     $item.SetAttribute("VMId", $member.VMId)
-    $item.SetAttribute("CheckpointId", $targetSnapshot[0].Id)
+    $item.SetAttribute("CheckpointId", $targetSnapshot.Id)
   }
 }
 function Resolve-StartVMActionsConfiguration_EachAction_Inject {
@@ -883,9 +904,7 @@ function Resolve-StartVMActionsConfiguration_EachAction_Inject {
     $Members
   )
 
-  if ($null -eq $Action.Credential) {
-    throw "No credential was provided for this action, and none could not be derived from the actionset, configuration, or fallback credential store."
-  }
+  Resolve-StartVMActionsConfiguration_Credential -Node $ACtion
 }
 function Resolve-StartVMActionsConfiguration_EachAction_ConfigHw {
   [CmdletBinding(
@@ -955,6 +974,15 @@ function Resolve-StartVMActionsConfiguration_EachAction_TakeCheckpoint {
   if ($context -eq "Config") {
     $Action.CheckpointName = "Class-Ready Configuration ($($Action.CheckpointName))"
   }
+
+  if ($context -eq "Save") {
+    if ($Action.CheckpointName.Length -eq 0) {
+      $Action.CheckpointName = "Mid-Class Configuration"
+    }
+    else {
+      $Action.CheckpointName = "Mid-Class Configuration ($($Action.CheckpointName))"
+    }
+  }
   elseif ($context -eq "UpdateTest") {
     $Action.CheckpointName = "Update Test Configuration"
   }
@@ -990,6 +1018,80 @@ function Resolve-StartVMActionsConfiguration_EachAction_TakeCheckpoint {
 
     if (Test-Path -LiteralPath "function:\$handlerName") {
       & $handlerName -Action $Action -Members $members
+    }
+  } catch {
+    $PSCmdlet.ThrowTerminatingError($_)
+  }
+}
+
+# Encompasses inheritance, verification of presence where required, and
+# validity checking.
+function Resolve-StartVMActionsConfiguration_Credential {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $Node
+  )
+
+  try {
+    $credNode = $node.SelectSingleNode("Credential")
+
+    if ($credNode -eq $null) {
+      $credOptions = @()
+
+      if ($node.LocalName -eq "Member") {
+        $memberName = $node.Name
+      }
+      elseif ($node.LocalName -eq "Action") {
+        $memberName = $node.Target
+      }
+
+      # 'Inject' Action resolves up to ActionSet Member
+      $credOptions += $node.SelectNodes("../../Members/Member") |
+                        Where-Object Name -eq $memberName |
+                        ForEach-Object Credential
+
+      # 'Inject' Action or ActionSet Member resolves up to Configuration Member
+      $credOptions += $node.SelectNodes("../../../../Members/Member") |
+                        Where-Object Name -eq $memberName |
+                        ForEach-Object Credential
+
+      # Any context will take a Fallback Credential.
+      $credOptions += $script:resources.FallbackCredentials |
+                        Where-Object MemberName -eq $memberName
+
+      $cred = $credOptions |
+                Where-Object {$_ -ne $null} |
+                Select-Object -First 1
+
+      if ($cred -eq $null -and $node.LocalName -eq "Member") {
+        return
+      }
+      elseif ($cred -eq $null -and $node.LocalName -eq "Action") {
+        throw "No credential was provided for this action, and none could not be derived from the actionset, configuration, or fallback credential store."
+      }
+
+      $credNode = $node.AppendChild(
+        $node.
+        OwnerDocument.
+        CreateElement("Credential")
+      )
+
+      $credNode.SetAttribute("UserName", $cred.UserName)
+      $credNode.SetAttribute("Password", $cred.Password)
+    }
+
+    if ($credNode.UserName -ne $credNode.UserName.Trim()) {
+      throw "Credential UserName had leading or trailing whitespace."
+    }
+
+    if ($credNode.Password -ne $credNode.Password.Trim()) {
+      throw "Credential Password had leading or trailing whitespace."
     }
   } catch {
     $PSCmdlet.ThrowTerminatingError($_)
@@ -1255,6 +1357,8 @@ function Invoke-StartVMAction_RestoreCheckpoint {
     $RuntimeConfig
   )
   process {
+    $context = $Action.SelectSingleNode("../..").Context
+
     $items = $Action.SelectNodes("CheckpointMap/CheckpointMapItem")
 
     foreach ($item in $items) {
@@ -1268,8 +1372,131 @@ function Invoke-StartVMAction_RestoreCheckpoint {
       Get-VMSnapshot -Id $item.CheckpointId |
         Restore-VMSnapshot -Confirm:$false
     }
+
+    if ($context -ne "Restore") {
+      return
+    }
+
+    Write-Verbose "  - Deleting mid-class checkpoint(s) and waiting for vhd merge."
+
+    foreach ($item in $items) {
+
+      $snapshot = Get-VMSnapshot -Id $item.CheckpointId
+
+      # For reasons unknown, trying to pipe directly to this cmdlet from
+      # Get-VMSnapshot writes an obscure error.
+      Remove-VMSnapshot -VMSnapshot $snapshot -Confirm:$false
+
+      do {
+        Start-Sleep -Seconds 1
+      } until ((Get-VM -Id $item.VMId).Status -eq "Operating normally")
+    }
   }
 }
+function Invoke-StartVMAction_Clean {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+  }
+}
+
+function Invoke-StartVMAction_ConfigHw {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+    $vm = Get-VM -Id $Action.VMId
+
+    $setParams = @{}
+
+    if ($null -ne $Action.ProcessorCount) {
+      $setParams.ProcessorCount = $Action.ProcessorCount
+    }
+
+    if ($null -ne $Action.MemoryBytes) {
+      $setParams.StaticMemory = $true
+      $setParams.MemoryStartupBytes = $Action.MemoryBytes
+    }
+
+    if ($setParams.Count -gt 0) {
+      $vm |
+        Set-VM @setParams
+    }
+
+    if ($null -ne $Action.NetworkAdapters) {
+      $vm |
+        Get-VMNetworkAdapter |
+        Remove-VMNetworkAdapter
+
+      $adapters = @(
+        $Action.SelectNodes("NetworkAdapters/NetworkAdapter") |
+          ForEach-Object InnerXml
+      )
+
+      foreach ($adapter in $adapters) {
+        $params = @{}
+
+        if ($adapter -ne 'none') {
+          $params.SwitchName = $adapter
+        }
+
+        $vm |
+          Add-VMNetworkAdapter @params
+      }
+    }
+  }
+}
+function Invoke-StartVMAction_Custom {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+  }
+}
+
 function Invoke-StartVMAction_Start {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1291,8 +1518,16 @@ function Invoke-StartVMAction_Start {
   process {
     $vm = Get-VM -Id $Action.VMId
 
-    if ($vm.State -ne "Off") {
-      throw "This action requires the vm be in an 'Off' state."
+    $context = $Action.SelectSingleNode("../..").Context
+
+    $goodStates = @("Off")
+
+    if ($context -eq "Restore") {
+      $goodStates += "Saved"
+    }
+
+    if ($vm.State -notin $goodStates) {
+      throw "This action requires the vm be in an 'Off' state, *or* 'Saved' for actionset context 'Restore'."
     }
 
     $vm |
@@ -1313,6 +1548,7 @@ function Invoke-StartVMAction_Start {
     } until ($vmHeartbeat -ceq "Ok")
   }
 }
+
 function Invoke-StartVMAction_Inject {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1404,168 +1640,7 @@ function Invoke-StartVMAction_Inject {
     }
   }
 }
-function Invoke-StartVMAction_Stop {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Mandatory = $true,
-      ValueFromPipeline = $true
-    )]
-    [System.Xml.XmlElement]
-    $Action,
 
-    [Parameter(
-      Mandatory = $true
-    )]
-    [PSCustomObject]
-    $RuntimeConfig
-  )
-  process {
-    $vm = Get-VM -Id $Action.VMId
-
-    if ($vm.State -ne "Running") {
-      throw "This action requires the vm be in a 'Running' state."
-    }
-
-    $vm |
-      Stop-VM -Force
-
-    while ((Get-VM -Id $vm.Id).State -ne "Off") {
-      Start-Sleep -Seconds 5
-    }
-  }
-}
-function Invoke-StartVMAction_Custom {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Mandatory = $true,
-      ValueFromPipeline = $true
-    )]
-    [System.Xml.XmlElement]
-    $Action,
-
-    [Parameter(
-      Mandatory = $true
-    )]
-    [PSCustomObject]
-    $RuntimeConfig
-  )
-  process {
-  }
-}
-function Invoke-StartVMAction_ConfigHw {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Mandatory = $true,
-      ValueFromPipeline = $true
-    )]
-    [System.Xml.XmlElement]
-    $Action,
-
-    [Parameter(
-      Mandatory = $true
-    )]
-    [PSCustomObject]
-    $RuntimeConfig
-  )
-  process {
-    $vm = Get-VM -Id $Action.VMId
-
-    $setParams = @{}
-
-    if ($null -ne $Action.ProcessorCount) {
-      $setParams.ProcessorCount = $Action.ProcessorCount
-    }
-
-    if ($null -ne $Action.MemoryBytes) {
-      $setParams.StaticMemory = $true
-      $setParams.MemoryStartupBytes = $Action.MemoryBytes
-    }
-
-    if ($setParams.Count -gt 0) {
-      $vm |
-        Set-VM @setParams
-    }
-
-    if ($null -ne $Action.NetworkAdapters) {
-      $vm |
-        Get-VMNetworkAdapter |
-        Remove-VMNetworkAdapter
-
-      $adapters = @(
-        $Action.SelectNodes("NetworkAdapters/NetworkAdapter") |
-          ForEach-Object InnerXml
-      )
-
-      foreach ($adapter in $adapters) {
-        $params = @{}
-
-        if ($adapter -ne 'none') {
-          $params.SwitchName = $adapter
-        }
-
-        $vm |
-          Add-VMNetworkAdapter @params
-      }
-    }
-  }
-}
-function Invoke-StartVMAction_TakeCheckpoint {
-  [CmdletBinding(
-    PositionalBinding = $false
-  )]
-  param(
-    [Parameter(
-      Mandatory = $true,
-      ValueFromPipeline = $true
-    )]
-    [System.Xml.XmlElement]
-    $Action,
-
-    [Parameter(
-      Mandatory = $true
-    )]
-    [PSCustomObject]
-    $RuntimeConfig
-  )
-  process {
-    $vms = @(
-      $Action.SelectNodes("../../Members/Member") |
-        Where-Object Present -eq true |
-        ForEach-Object {
-          Get-VM -Id $_.VMId
-        }
-    )
-
-    $state = @(
-      $vms |
-        ForEach-Object State |
-        Sort-Object -Unique
-    )
-
-    if ($state.Count -ne 1 -or $state[0] -ne "Off") {
-      throw "This action requires all present member vms be in an 'Off' state."
-    }
-
-    foreach ($vm in $vms) {
-      $vm |
-        Get-VMSnapshot |
-        Where-Object Name -eq $Action.CheckpointName |
-        Remove-VMSnapshot -Confirm:$false
-
-      $vm |
-        Checkpoint-VM -SnapshotName $Action.CheckpointName
-    }
-  }
-}
 function Invoke-StartVMAction_ConfigRdp {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1710,6 +1785,7 @@ function Invoke-StartVMAction_ConfigRdp {
       Out-Null
   }
 }
+
 function Invoke-StartVMAction_Connect {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1738,7 +1814,8 @@ function Invoke-StartVMAction_Connect {
     Start-CTVMConnect -VM $vm
   }
 }
-function Invoke-StartVMAction_Clean {
+
+function Invoke-StartVMAction_Stop {
   [CmdletBinding(
     PositionalBinding = $false
   )]
@@ -1757,8 +1834,133 @@ function Invoke-StartVMAction_Clean {
     $RuntimeConfig
   )
   process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -ne "Running") {
+      throw "This action requires the vm be in a 'Running' state."
+    }
+
+    $vm |
+      Stop-VM -Force
+
+    while ((Get-VM -Id $vm.Id).State -ne "Off") {
+      Start-Sleep -Seconds 5
+    }
   }
 }
+function Invoke-StartVMAction_SaveIfNeeded {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -eq "Off") {
+      Write-Verbose "  - Skipped, as vm is already 'Off'."
+      return
+    }
+
+    if ($vm.State -ne "Running") {
+      throw "This action requires the vm be in an 'Off' or 'Running' state."
+    }
+
+    $vm |
+      Stop-VM -Save -Force
+
+    while ((Get-VM -Id $vm.Id).State -ne "Saved") {
+      Start-Sleep -Seconds 5
+    }
+  }
+}
+function Invoke-StartVMAction_TakeCheckpoint {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+    $vms = @(
+      $Action.SelectNodes("../../Members/Member") |
+        Where-Object Present -eq true |
+        ForEach-Object {
+          Get-VM -Id $_.VMId
+        }
+    )
+
+    $context = $Action.SelectSingleNode("../..").Context
+
+    $goodStates = @("Off")
+
+    if ($context -eq "Save") {
+      $goodStates += "Saved"
+    }
+
+    $badStates = @(
+      $vms |
+        ForEach-Object State |
+        Sort-Object -Unique |
+        Where-Object {$_ -notin $goodStates}
+    )
+
+    if ($badStates.Count -ne 0) {
+      throw "This action requires all present member vms be in an 'Off' state, *or* 'Saved' for actionset context 'Save'."
+    }
+
+    foreach ($vm in $vms) {
+      $snapshotsToRemove = @(
+        $vm |
+          Get-VMSnapshot |
+          Where-Object Name -eq $Action.CheckpointName
+      )
+
+      # The value is filtered down in this manner to support having a "Restore"
+      # context RestoreCheckpoint action preferentially restore the "Mid-Class
+      # Configuration" checkpoint beneath the "Class-Ready Configuration"
+      # identified by CheckpointName. In this case, having more than one
+      # checkpoint for a vm with the same name is not a bad thing, so
+      # long as no more than one is below each "Class-Ready Configuration".
+      if ($Action.CheckpointName -eq "Mid-Class Configuration") {
+        $snapshotsToRemove = @(
+          $snapshotsToRemove |
+            Where-Object ParentSnapshotId -eq $vm.ParentSnapshotId
+        )
+      }
+
+      $snapshotsToRemove |
+        Remove-VMSnapshot -Confirm:$false
+
+      $vm |
+        Checkpoint-VM -SnapshotName $Action.CheckpointName
+    }
+  }
+}
+
 function Invoke-StartVMAction_ReplaceCheckpoint {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1815,877 +2017,6 @@ function Invoke-StartVMAction {
       $PSCmdlet.ThrowTerminatingError($_)
     }
   }
-}
-#endregion
-
-#region Retrieve/Test Toolset/Actions Config
-function Test-StartVMActionsConfig_Members_Each ($Member) {
-  Start-Task "#$inc"
-
-  #region Validate Obj. Content / Structure
-  if ($Member -isnot [PSCustomObject]) {
-    Complete-Task -Status Terminal "Each Member must be a [PSCustomObject]."
-  }
-
-  if (     $Member.VMName -isnot [String] `
-       -or $Member.VMName.Length -eq 0 `
-       -or $Member.VMName.Length -ne $Member.VMName.Trim().Length
-     ) {
-    Complete-Task -Status Terminal "Member.VMName must be a non-empty [String] with no leading or trailing whitespace."
-  }
-
-  if (      $Member.UserName -ne $null `
-       -and (     $Member.UserName -isnot [String] `
-              -or $Member.UserName.Length -eq 0 `
-              -or $Member.UserName.Length -ne $Member.UserName.Trim().Length
-            )
-     ) {
-    Complete-Task -Status Terminal "If provided, Member.UserName must be a non-empty [String] with no leading or trailing whitespace."
-  }
-
-  if (      $Member.Password -ne $null `
-       -and (     $Member.Password -isnot [String] `
-              -or $Member.Password.Length -eq 0 `
-              -or $Member.Password.Length -ne $Member.Password.Trim().Length
-            )
-     ) {
-    Complete-Task -Status Terminal "If provided, Member.Password must be a non-empty [String] with no leading or trailing whitespace."
-  }
-
-  if (     (      $Member.UserName -eq $null `
-             -and $Member.Password -ne $null `
-           ) `
-       -or (      $Member.UserName -ne $null `
-             -and $Member.Password -eq $null
-           )
-     ) {
-    Complete-Task -Status Terminal "Member.UserName and Member.Password must be provided together, or not at all."
-  }
-
-  if ($Member.Optional -isnot [bool]) {
-    Complete-Task -Status Terminal "Member.Optional must be a [Boolean]."
-  }
-  #endregion
-
-  #region Validate VM/Attributes On Current System.
-  $vms = @(
-    Get-VM |
-      Where-Object Name -eq $Member.VMName
-  )
-
-  if ($vms.Count -gt 1) {
-    Complete-Task -Status Terminal "$($vms.Count) distinct virtual machines named '$($Member.VMName)' were found on this computer. This script is not equipped to tolerate this ambiguity."
-  }
-
-  if ($vms.Count -eq 0 -and -not $Member.Optional) {
-    Complete-Task -Status Terminal "No virtual machine named '$($Member.VMName)' was found on this computer. Presence of this vm is mandatory for this actions configuration."
-  }
-
-  if ($vms.Count -eq 1) {
-    $vm = $vms[0]
-
-    $topCheckpoint = @(
-      Get-VMSnapshot -VM $vm |
-        Where-Object ParentSnapshotName -eq $null
-    )
-
-    if (     $topCheckpoint.Count -ne 1 `
-         -or (      $topCheckpoint.Name -notlike "Post-Import Starting Image*" `
-               -and $topCheckpoint.Name -notlike "Known Good Configuration*"
-             )
-       ) {
-      Complete-Task -Status Terminal "No unambiguous candidate for top-level 'Post-Import' or 'Known Good' checkpoint was found for the vm '$($Member.VMName)'."
-    }
-  }
-  #endregion
-
-  if ($Member.UserName -ne $null) {
-    $Credential = Get-StartVMCredential -UserName $Member.UserName -Password $Member.Password
-  }
-  else { # Will be null if VMName is not found.
-    $Credential = Get-StartVMCredential -VMName $Member.VMName
-  }
-
-  $outObj = [PSCustomObject]@{
-    VMName = $Member.VMName
-    Credential = $Credential
-    Optional = $Member.Optional
-    Present = $vms.Count -eq 1
-  }
-
-  $optMap = @{
-    $true  = "Optional"
-    $false = "Required" 
-  }
-
-  $presentMap = @{
-    $true  = "Present"
-    $false = "Absent"
-  }
-
-  Complete-Task -Status Info "Done! ($($outObj.VMName,$optMap.($outObj.Optional),$presentMap.($outObj.Present) -join " | "))"
-
-  $outObj
-}
-function Test-StartVMActionsConfig_Members ($Members) {
-  Start-Task "Validating member vm(s)"
-
-  if ($Members -isnot [Object[]] -or $Members.Count -eq 0) {
-    Complete-Task -Status Terminal "Config.Members must be a non-empty [Object[]] array."
-  }
-
-  $inc = 1
-  $Members = @(
-    $Members |
-      ForEach-Object {
-        Test-StartVMActionsConfig_Members_Each $_
-        $inc++
-      }
-  )
-
-  $uniqueCount = @(
-    $Members |
-      ForEach-Object VMName |
-      Sort-Object -Unique
-  ).Count
-
-  if ($Members.Count -ne $uniqueCount) {
-    Complete-Task -Status Terminal "Each Member must have a unique VMName."
-  }
-
-  $mandatoryCount = @(
-    $Members |
-      Where-Object Optional -eq $false
-  ).Count
-
-  if ($mandatoryCount -eq 0) {
-    Complete-Task -Status Terminal "At least one Member must be Mandatory."
-  }
-
-  Complete-Task -Status Info "Validated $($members.Count) member vm(s)."
-
-  $Members
-}
-
-function Test-StartVMActionsConfig_Actions_Each_VMName ($Action, $Members) {
-  if ($Action.VMName -eq $null -and $Members.Count -eq 1) {
-    $Action.VMName = $Members[0].VMName
-  }
-
-  if ($Action.VMName -eq $null) {
-    Complete-Task -Status Terminal "When an action configuration has more than a single member vm, an action of type '$($Action.Type)' must use the VMName parameter to target a specific member." -SkipSameOriginTest
-  }
-
-  if ($Action.VMName -cnotin $Members.VMName) {
-    Complete-Task -Status Terminal "Action.VMName must be the name of a member associated with the action configuration." -SkipSameOriginTest
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each_Type_RestoreCheckpoint ($Action, $Members, $Context) {
-  if ($Action.CheckpointName -ne $null -and $Action.CheckpointMap -ne $null) {
-    Complete-Task -Status Terminal "An action of type 'RestoreCheckpoint' may specify a checkpoint name or a checkpoint map, but not both." -SkipSameOriginTest
-  }
-
-  if (      $Action.CheckpointName -ne $null `
-       -and (     $Action.CheckpointName -isnot [String] `
-              -or $Action.CheckpointName.Length -eq 0 `
-              -or $Action.CheckpointName -ne $Action.CheckpointName.Trim() `
-            )
-     ) {
-    Complete-Task -Status Terminal "Action.CheckpointName must be a non-empty [String] with no leading or trailing whitespace." -SkipSameOriginTest
-  }
-
-  if ($Action.CheckpointMap -eq $null) {
-    $Action.CheckpointMap = @{}
-
-    foreach ($name in $Members.VMName) {
-      $Action.CheckpointMap.$name = $Action.CheckpointName
-    }
-  }
-
-  if ($Action.CheckpointMap -isnot [hashtable]) {
-    Complete-Task -Status Terminal "Action.CheckpointMap must be a [Hashtable]." -SkipSameOriginTest
-  }
-
-  if ($Context -eq "Update" -and ([Array]$Action.CheckpointMap.Values)[0] -ne $null) {
-    Complete-Task -Status Terminal "When an Action of type 'RestoreCheckpoint' is used in an 'Update' context, it must be used to restore the top 'Post-Import' or 'Known Good' checkpoint." -SkipSameOriginTest
-  }
-
-  $vmNames = $Action.CheckpointMap.Keys
-
-  foreach ($vmName in $vmNames) {
-    if (     $vmName -isnot [string] `
-         -or $vmName.Length -eq 0 `
-         -or $vmName -ne $vmName.Trim() `
-         -or $vmName -notin $Members.VMName
-    ) {
-      Complete-Task -Status Terminal "Each key in Action.CheckpointMap must be the [String] name of a member associated with the action configuration." -SkipSameOriginTest
-    }
-  }
-
-  $uniqueVMNamesCount = @(
-    $vmNames |
-      Sort-Object -Unique
-  ).Count
-
-  if ($vmNames.Count -ne $uniqueVMNamesCount) {
-    Complete-Task -Status Terminal "Each key in Action.CheckpointMap must be unique." -SkipSameOriginTest
-  }
-
-  if ($vmNames.Count -ne $Members.Count) {
-    Complete-Task -Status Terminal "When an Action.CheckpointMap is provided, each member associated with the action configuration must be represented." -SkipSameOriginTest
-  }
-
-  $checkpointNames = $Action.CheckpointMap.Values
-
-  foreach ($checkpointName in $checkpointNames) {
-    if (      $checkpointName -ne $null `
-         -and (     $checkpointName -isnot [String] `
-                -or $checkpointName.Length -eq 0 `
-                -or $checkpointName -ne $checkpointName.Trim() `
-              )
-       ) {
-      Complete-Task -Status Terminal "Each value in Action.CheckpointMap must either be null (indicating the top checkpoint), or a [String] identifier of a 'Class-Ready' checkpoint to restore." -SkipSameOriginTest
-    }
-  }
-
-  $presentVms = @(
-    $Members |
-      Where-Object Present -eq $true |
-      ForEach-Object VMName
-  )
-
-  $newMap = [ordered]@{}
-
-  foreach ($vmName in $vmNames) {
-    if ($vmName -notin $presentVms) {
-      continue
-    }
-
-    if ($Action.CheckpointMap.$vmName -eq $null) {
-      $snapshot = @(
-        Get-VMSnapshot -VMName $vmName |
-          Where-Object ParentSnapshotName -eq $null |
-          ForEach-Object Id
-      )
-    }
-    else {
-      $snapshot = @(
-        Get-VMSnapshot -VMName $vmName |
-          Where-Object Name -eq "Class-Ready Configuration ($($Action.CheckpointMap.$vmName))" |
-          ForEach-Object Id
-      )
-    }
-
-    if ($snapshot.Count -ne 1) {
-      Complete-Task -Status Terminal "The script could not resolve a definitive target snapshot id for the vm '$vmName' in a RestoreCheckpoint action." -SkipSameOriginTest
-    }
-
-    $newMap.$vmName = $snapshot[0]
-  }
-
-  [PSCustomObject]@{
-    Type = "RestoreCheckpoint"
-    CheckpointMap = $newMap
-    AutoReconfig = $presentVms.Count -eq 1 -and $Context -ne "Update"
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_Start ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  if ($Action.WaitForHeartbeat -isnot [bool]) {
-    Complete-Task -Status Terminal "Action.WaitForHeartbeat must be a [Boolean]." -SkipSameOriginTest
-  }
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_Config ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  if ($Action.Script -isnot [scriptblock]) {
-    Complete-Task -Status Terminal "Action.Script must be a [ScriptBlock]." -SkipSameOriginTest
-  }
-
-  $validModes = "AtOnce","KVP"
-
-  if ($Action.FinMode -isnot [string] -or $Action.FinMode -cnotin $validModes) {
-    Complete-Task -Status Terminal "Action.FinMode must be a [String] that is a case-sensitive match for one of the following valid modes: '$($validModes -join "', '")'." -SkipSameOriginTest
-  }
-
-  if ($Action.UseResourceServer -isnot [bool]) {
-    Complete-Task -Status Terminal "Action.UseResourceServer must be a [Boolean]." -SkipSameOriginTest
-  }
-
-  if ($Action.UsePhysHostName -isnot [bool]) {
-    Complete-Task -Status Terminal "Action.UsePhysHostName must be a [Boolean]." -SkipSameOriginTest
-  }
-
-  $member = $members |
-              Where-Object VMName -eq $Action.VMName
-
-  if ($member.Credential -eq $null) {
-    Complete-Task -Status Terminal "An action of type 'Config' requires credentials to the member vm, whether embedded in the module or supplied in the member definition, to authenticate the PowerShell direct management pathway." -SkipSameOriginTest
-  }
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_Stop ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each_Type_Custom ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each_Type_Clean ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_ReplaceCheckpoint ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each_Type_NetworkAdapters ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  if ($Action.NetworkAdapters -isnot [String[]] -or $Action.NetworkAdapters.Count -eq 0) {
-    Complete-Task -Status Terminal "Action.NetworkAdapters must be a non-empty [String[]] array." -SkipSameOriginTest
-  }
-
-  $SwitchNames = Get-VMSwitch |
-                   ForEach-Object Name
-
-  foreach ($adapter in $Actions.NetworkAdapters) {
-    if ($adapter -notin $SwitchNames) {
-      Complete-Task -Status Terminal "Each adapter in Action.NetworkAdapters must be the name of a virtual switch available on the system." -SkipSameOriginTest
-    }
-  }
-
-  $presentVMs = $Members |
-                  Where-Object Present |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_TakeCheckpoint ($Action, $Members) {
-  if (     $Action.CheckpointName -isnot [String] `
-       -or $Action.CheckpointName.Length -eq 0 `
-       -or $Action.CheckpointName -ne $Action.CheckpointName.Trim() `
-     ) {
-    Complete-Task -Status Terminal "Action.CheckpointName must be a non-empty [String] with no leading or trailing whitespace." -SkipSameOriginTest
-  }
-
-  if ($Action.IncludeOptional -isnot [bool]) {
-    Complete-Task -Status Terminal "Action.IncludeOptional must be a [Boolean]." -SkipSameOriginTest
-  }
-
-  $CheckpointName = "Class-Ready Configuration ($($Action.CheckpointName))"
-
-  $Targets = @(
-    $Members |
-      Where-Object Present
-  )
-
-  if (-not $Action.IncludeOptional) {
-    $Targets = @(
-      $Targets |
-        Where-Object Optional -eq $false
-    )
-  }
-
-  [PSCustomObject]@{
-    Type           = "TakeCheckpoint"
-    CheckpointName = $CheckpointName
-    VMNames        = $Targets.VMName
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each_Type_ConfigRdp ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  if ($Action.Clear -isnot [bool] -or $Action.Config -isnot [bool]) {
-    Complete-Task -Status Terminal "Action.Clear and Action.Config must be [Boolean]." -SkipSameOriginTest
-  }
-
-  if ($Action.Config -and -not $Action.Clear) {
-    Complete-Task -Status Terminal "If Action.Config is `$true, Action.Clear must also be `$true." -SkipSameOriginTest
-  }
-
-  if ($Action.Config) {
-    if ($Action.RedirectAudio -isnot [bool] -or $Action.RedirectMicrophone -isnot [bool]) {
-      Complete-Task -Status Terminal "If Action.Config is `$true, Action.RedirectAudio and Action.RedirectMicrophone must be defined as [Boolean]." -SkipSameOriginTest
-    }
-  }
-
-  $presentVms = $Members |
-                  Where-Object Present -eq $true |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-function Test-StartVMActionsConfig_Actions_Each_Type_Connect ($Action, $Members) {
-  Test-StartVMActionsConfig_Actions_Each_VMName $Action $Members
-
-  $presentVms = $Members |
-                  Where-Object Present -eq $true |
-                  ForEach-Object VMName
-
-  if ($Action.VMName -in $presentVMs) {
-    $Action
-  }
-}
-
-function Test-StartVMActionsConfig_Actions_Each ($Action, $Members, $Context) {
-  Start-Task "#$inc"
-
-  if ($Action -isnot [PSCustomObject]) {
-    Complete-Task -Status Terminal "Each Action must be a [PSCustomObject]."
-  }
-
-  if (
-    $Action.Type -isnot [String]                       -or
-    $Action.Type.Length -eq 0                          -or
-    $Action.Type.Length -ne $Action.Type.Trim().Length
-  ) {
-    Complete-Task -Status Terminal "Action.Type must be a non-empty [String] with no leading or trailing whitespace."
-  }
-
-  $functionName = "Test-StartVMActionsConfig_Actions_Each_Type_$($Action.Type)"
-  $functionPath = Join-Path -Path function:\ -ChildPath $functionName
-
-  if (-not (Test-Path -LiteralPath $functionPath)) {
-    Complete-Task -Status Terminal "No validation function exists for this Action.Type."
-  }
-
-  & $functionName $Action $Members $Context
-
-  $msgAug = $Action.Type
-  if ($Action.VMName -ne $null) {
-    $msgAug += " w/ $($Action.VMName)"
-  }
-
-  Complete-Task -Status Info "Done! ($msgAug)"
-}
-
-function Test-StartVMActionsConfig_Actions_Context_Config ($Actions, $Members) {
-  $allowedTypes = @(
-    "RestoreCheckpoint"
-    "NetworkAdapters"
-    "Start"
-    "Config"
-    "Stop"
-    "Custom"
-    "TakeCheckpoint"
-  )
-
-  $badActionCount = @(
-    $Actions |
-      Where-Object Type -notin $allowedTypes
-  ).Count
-
-  if ($badActionCount -gt 0) {
-    Complete-Task -Status Terminal "The actions included one or more types that are invalid for the Config context. Valid types for the Config context are as follows: '$($allowedTypes -join "', '")'." -SkipSameOriginTest
-  }
-
-  if ($Actions[-1].Type -ne "TakeCheckpoint") {
-    Complete-Task -Status Terminal "An actionset for the config context must always conclude with a TakeCheckpoint action." -SkipSameOriginTest
-  }
-}
-function Test-StartVMActionsConfig_Actions_Context_Start ($Actions, $Members) {
-  $allowedTypes = @(
-    "RestoreCheckpoint"
-    "Start"
-    "Config"
-    "ConfigRdp"
-    "Connect"
-    "Custom"
-  )
-
-  $badActionCount = @(
-    $Actions |
-      Where-Object Type -notin $allowedTypes
-  ).Count
-
-  if ($badActionCount -gt 0) {
-    Complete-Task -Status Terminal "The actions included one or more types that are invalid for the Start context. Valid types for the Start context are as follows: '$($allowedTypes -join "', '")'." -SkipSameOriginTest
-  }
-
-  if ($Actions[-1].Type -ne "Connect") {
-    Complete-Task -Status Terminal "An actionset for the start context must always conclude with a Connect action." -SkipSameOriginTest
-  }
-}
-function Test-StartVMActionsConfig_Actions_Context_Update ($Actions, $Members) {
-  $allowedTypes = @(
-    "RestoreCheckpoint"
-    "Clean"
-    "Start"
-    "Config"
-    "Stop"
-    "Custom"
-    "ReplaceCheckpoint"
-  )
-
-  $badActionCount = @(
-    $Actions |
-      Where-Object Type -notin $allowedTypes
-  ).Count
-
-  if ($Members.Count -ne 1) {
-    Complete-Task -Status Terminal "An actionset for the 'Update' context may define only one member vm." -SkipSameOriginTest
-  }
-
-  if ($badActionCount -gt 0) {
-    Complete-Task -Status Terminal "The actions included one or more types that are invalid for the Update context. Valid types for the Update context are as follows: '$($allowedTypes -join "', '")'." -SkipSameOriginTest
-  }
-
-  if ($Actions[1].Type -ne "Clean") {
-    Complete-Task -Status Terminal "In an actionset for the Update context, the second action must be a Clean action, to remove all other VM checkpoints." -SkipSameOriginTest
-  }
-
-  if ($Actions[-1].Type -ne "ReplaceCheckpoint") {
-    Complete-Task -Status Terminal "An actionset for the Update context must always conclude with a ReplaceCheckpoint action." -SkipSameOriginTest
-  }
-}
-
-function Test-StartVMActionsConfig_Actions ($ActionSets, $Members, $Context) {
-  Start-Task "Validating action(s)"
-
-  if ($ActionSets -isnot [Object[]] -or $ActionSets.Count -eq 0) {
-    Complete-Task -Status Terminal "Config.ActionSets must be a non-empty [Object[]] array."
-  }
-
-  $ActionSet = @(
-    $ActionSets |
-      Where-Object Context -eq $Context
-  )
-
-  if ($ActionSet.Count -ne 1) {
-    Complete-Task -Status Terminal "The actions configuration must define exactly one ActionSet for a given Context to be used in that context. This configuration defined $($ActionSet.Count) actionset(s) for context '$Context'."
-  }
-
-  $ActionSet = $ActionSet[0]
-
-  if (     $ActionSet.Actions -isnot [Object[]] `
-       -or $ActionSet.Actions.Count -eq 0
-     ) {
-    Complete-Task -Status Terminal "ActionSet.Actions must be a non-empty [Object[]] array."
-  }
-
-  $inc = 1
-  $ActionSet.Actions = @(
-    $ActionSet.Actions |
-      ForEach-Object {
-        Test-StartVMActionsConfig_Actions_Each $_ $Members $Context
-        $inc++
-      }
-  )
-
-  if ($ActionSet.Actions[0].Type -ne "RestoreCheckpoint") {
-    Complete-Task -Status Terminal "Regardless of context, the first action of any actionset must be of the 'RestoreCheckpoint' type."
-  }
-
-  $functionName = "Test-StartVMActionsConfig_Actions_Context_$Context"
-  $functionPath = Join-Path -Path function:\ -ChildPath $functionName
-
-  if (-not (Test-Path -LiteralPath $functionPath)) {
-    Complete-Task -Status Terminal "No validation function exists for context '$Context'."
-  }
-
-  & $functionName $ActionSet.Actions $Members
-
-  if ($Context -ne "Start" -and $ActionSet.EnhancedSessionMode -ne $null) {
-    Complete-Task -Status Terminal "Enhanced Session Mode may be configured only for the 'Start' ActionSet Context."
-  }
-  elseif ($Context -ne "Start" -or $ActionSet.EnhancedSessionMode -eq $null) {
-    $ActionSet.EnhancedSessionMode = $false
-  }
-
-  if ($ActionSet.EnhancedSessionMode -isnot [bool]) {
-    Complete-Task -Status Terminal "EnhancedSessionMode must be a [Boolean]."
-  }
-
-  Complete-Task -Status Info "Validated $($ActionSet.Actions.Count) action(s)."
-
-  $ActionSet
-}
-
-function Confirm-UpdateContext ($Members) {
-
-  Start-Task "Prompting user to confirm implementation of update"
-
-  Suspend-TaskLogging
-
-  $choices = [System.Collections.ObjectModel.Collection[System.Management.Automation.Host.ChoiceDescription]]::new()
-  $choices += [System.Management.Automation.Host.ChoiceDescription]::new(
-    "Implement",
-    "Remove all existing Class-Ready Configuration checkpoints and update the Known Good Configuration checkpoint for `"$($Members[0].VMName)`"."
-  )
-  $choices += [System.Management.Automation.Host.ChoiceDescription]::new(
-    "Test",
-    "Test configuration changes using a mock `"Class-Ready Configuration`" checkpoint for `"$($Members[0].VMName)`"."
-  )
-
-  Write-Host
-  $choice = $Host.UI.PromptForChoice(
-    $null,
-    "Are you sure you want to Implement this update by removing all existing Class-Ready Configuration checkpoints and updating the Known Good Configuration checkpoint, or would you rather Test this update instead?",
-    $choices,
-    1
-  )
-
-  Resume-TaskLogging
-
-  if ($choice -eq 0) {
-    Complete-Task -Status Info "User confirmed implementation of update."
-  }
-  elseif ($choice -eq 1) {
-    Complete-Task -Status Info "User elected to test implementation of update using a mock 'Class-Ready' checkpoint."
-  }
-
-  return $choice -eq 0
-}
-
-function Test-StartVMActionsConfig ($Config, $Context) {
-  Start-Task "Validating '$ActionName' w/ context '$Context'"
-
-  if ($Config -isnot [PSCustomObject]) {
-    Complete-Task -Status Terminal "Config must be a [PSCustomObject]."
-  }
-
-  $Members = @(
-    Test-StartVMActionsConfig_Members $Config.Members
-  )
-  $ActionSet = @(
-    Test-StartVMActionsConfig_Actions $Config.ActionSets $Members $Context
-  )
-
-  Complete-Task -Status       Info `
-                -Message      "'$ActionName' w/ context '$Context' is valid." `
-                -ShortMessage "Done!"
-
-  [PSCustomObject]@{
-    Members = $Members
-    ActionSet = $ActionSet
-  }
-}
-#endregion
-
-#region Orchestrate Actions
-function Do-StartVMActions_Custom ($Action) {
-  Start-Task "#$($inc): Custom w/ '$($Action.VMName)'"
-
-  $vm = Get-VM -Name $Action.VMName
-
-  if ($vm.State -ne "Off") {
-    Complete-Task -Status Terminal "An action of type 'Custom' requires the vm be in an 'Off' state."
-  }
-
-  $Action.Script.Invoke($vm) | Out-Null
-
-  Complete-Task -Status Info "Done!"
-}
-
-function Do-StartVMActions_Clean ($Action) {
-  Start-Task "#$($inc): Clean w/ '$($Action.VMName)'"
-
-  $vm = Get-VM -Name $Action.VMName
-
-  if ($vm.State -ne "Off") {
-    Complete-Task -Status Terminal "An action of type 'Clean' requires the vm be in an 'Off' state."
-  }
-
-  $currentCheckpoint = Get-VMSnapshot -Id $vm.ParentSnapshotId
-
-  if ($currentCheckpoint.ParentSnapshotName -ne $null) {
-    Complete-Task -Status Terminal "An action of type 'Clean' requires the top checkpoint be the one currently applied."
-  }
-
-  Get-VMSnapshot -VM $vm |
-    Where-Object ParentCheckpointId -eq $currentCheckpoint.Id |
-    Remove-VMSnapshot -IncludeAllChildSnapshots
-
-  Complete-Task -Status Info "Done!"
-}
-function Do-StartVMActions_ReplaceCheckpoint ($Action) {
-  Start-Task "#$($inc): Replace checkpoint w/ '$($Action.VMName)'"
-
-  $vm = Get-VM -Name $Action.VMName
-
-  if ($vm.State -ne "Off") {
-    Complete-Task -Status Terminal "An action of type 'ReplaceCheckpoint' requires the vm be in an 'Off' state."
-  }
-
-  Start-Task "Generating new 'Known Good Configuration' checkpoint"
-  $newCheckpoint = $vm |
-                     Checkpoint-VM -SnapshotName "Known Good Configuration" -Passthru
-  Complete-Task -Status Info "Done!"
-
-  Start-Task "Removing previous checkpoint"
-  $newCheckpoint.ParentSnapshotId |
-    Get-VMSnapshot |
-    Remove-VMSnapshot
-  Complete-Task -Status Info "Done!"
-
-  Start-Task "Waiting for vhd merge"
-  do {
-    Start-Sleep -Seconds 5
-  } while ((Get-VM -Id $vm.Id).Status -ne "Operating normally")
-  Complete-Task -Status Info "Done!"
-
-  Complete-Task -Status Info "Finished replacing checkpoint."
-}
-
-function Do-StartVMActions_ConfigRdp ($Action) {
-  Start-Task "#$($inc): Configure rdp options w/ '$($Action.VMName)'"
-
-  if ($action.Config -eq $false -and $action.Clear -eq $false) {
-    Complete-Task -Status Info "Done! (Retained)"
-    return
-  }
-
-  $vm = Get-VM -Name $Action.VMName
-
-  $configPath = Join-Path -Path ([System.Environment]::GetFolderPath("ApplicationData")) `
-                          -ChildPath Microsoft\Windows\Hyper-V\Client\1.0
-
-  $configPath = Join-Path -Path $configPath `
-                          -ChildPath "vmconnect.rdp.$($vm.Id).config"
-
-  if (Test-Path -LiteralPath $configPath) {
-    Remove-Item -LiteralPath $configPath -Force -Recurse
-  }
-
-  if ($action.Config -eq $false) {
-    Complete-Task -Status Info "Done! (Cleared)"
-    return
-  }
-
-  $xml = [System.Xml.XmlDocument]::new()
-
-  $xml.AppendChild(
-    $xml.CreateXmlDeclaration("1.0", "utf-8", $null)
-  ) | Out-Null
-
-  $cfgNode = $xml.CreateElement("configuration")
-  $xml.AppendChild($cfgNode) | Out-Null
-
-  $optsNode = $xml.CreateElement("Microsoft.Virtualization.Client.RdpOptions")
-  $cfgNode.AppendChild($optsNode) | Out-Null
-
-  function Add-Setting ($Name, $Value = '', $Type) {
-    $settingNode = $xml.CreateElement("setting")
-    $optsNode.AppendChild($settingNode) | Out-Null
-
-    if ($Type -eq $null) {
-      $Type = $Value.GetType().FullName
-    }
-
-    $settingNode.SetAttribute("name", $Name)
-    $settingNode.SetAttribute("type", $Type)
-
-    $valueNode = $xml.CreateElement("value")
-    $settingNode.AppendChild($valueNode) | Out-Null
-
-    if ($Type -isnot "System.String" -or $Value.Length -gt 0) {
-      $valueNode.InnerText = [string]$Value
-    }
-  }
-
-  Add-Type -AssemblyName System.Windows.Forms
-
-  $screenBounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-
-  if ($Action.RedirectAudio) {
-    $redirectSetting = "AUDIO_MODE_REDIRECT"
-  }
-  else {
-    $redirectSetting = "AUDIO_MODE_NONE"
-  }
-
-  Add-Setting SavedConfigExists $true
-  Add-Setting AudioCaptureRedirectionMode $Action.RedirectMicrophone
-  Add-Setting SaveButtonChecked $true
-  Add-Setting FullScreen $false
-  Add-Setting SmartCardsRedirection $false
-  Add-Setting RedirectedPnpDevices
-  Add-Setting ClipboardRedirection $false
-  Add-Setting DesktopSize ($screenBounds.Width,$screenBounds.Height -join ", ") System.Drawing.Size
-  Add-Setting VmServerName ([System.Net.Dns]::GetHostName())
-  Add-Setting RedirectedUsbDevices
-  Add-Setting UseAllMonitors $false
-  Add-Setting AudioPlaybackRedirectionMode $redirectSetting Microsoft.Virtualization.Client.RdpOptions+AudioPlaybackRedirectionType
-  Add-Setting PrinterRedirection $false
-  Add-Setting RedirectedDrives
-  Add-Setting VmName $vm.Name
-
-  #$xml.OuterXml
-
-  New-Item -Path $configPath -ItemType File -Value $xml.OuterXml -Force |
-    Out-Null
-
-  Complete-Task -Status Info "Done! (Configured)"
-}
-
-function Do-StartVMActions ($Config, $ToolsetConfig) {
-  Start-Task "Orchestrating action(s)" -Tags OrchestrateActions
-
-  $inc = 1
-  foreach ($Action in $Config.ActionSet.Actions) {
-    $functionName = "Do-StartVMActions_$($Action.Type)"
-
-    & $functionName $Action $Config.Members $ToolsetConfig
-
-    $inc++
-  }
-
-  Complete-Task -Status Info "Orchestrated $($Config.ActionSet.Actions.Count) action(s)."
 }
 #endregion
 
@@ -2824,6 +2155,8 @@ function Invoke-StartVM {
       "Config",
       "Start",
       "Test",
+      "Save",
+      "Restore",
       "Update"
     )]
     [String]

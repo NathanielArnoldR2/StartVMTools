@@ -56,9 +56,9 @@
             <xs:sequence>
               <!-- 
               A configuration may contain no more than one ActionSet for each
-              context. Hence, no more than 4 total.
+              context. Hence, no more than 6 total.
               -->
-              <xs:element name="ActionSet" type="ActionSet_Type" minOccurs="1" maxOccurs="4" />
+              <xs:element name="ActionSet" type="ActionSet_Type" minOccurs="1" maxOccurs="6" />
             </xs:sequence>
           </xs:complexType>
         </xs:element>
@@ -118,6 +118,8 @@
           <xs:enumeration value="Config" />
           <xs:enumeration value="Start" />
           <xs:enumeration value="Test" />
+          <xs:enumeration value="Save" />
+          <xs:enumeration value="Restore" />
           <xs:enumeration value="Update" />
         </xs:restriction>
       </xs:simpleType>
@@ -193,6 +195,43 @@
       </xs:extension>
     </xs:complexContent>
   </xs:complexType>
+  <xs:complexType name="CleanAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+
+  <xs:complexType name="ConfigHwAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <xs:element name="ProcessorCount" type="xs:unsignedByte" minOccurs="0" maxOccurs="1"/>
+          <xs:element name="MemoryBytes" type="xs:unsignedLong" minOccurs="0" maxOccurs="1"/>
+          <xs:element name="NetworkAdapters" minOccurs="0" maxOccurs="1">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="NetworkAdapter" type="string_notEmpty" minOccurs="0" maxOccurs="2" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="CustomAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <!--
+          VALIDITY:
+          - Difficult/Impossible to validate.
+          -->
+          <xs:element name="Script" type="xs:string" />
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+  
   <xs:complexType name="StartAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type">
@@ -206,6 +245,7 @@
       </xs:extension>
     </xs:complexContent>
   </xs:complexType>
+
   <xs:complexType name="InjectAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type">
@@ -254,52 +294,6 @@
       </xs:extension>
     </xs:complexContent>
   </xs:complexType>
-  <xs:complexType name="StopAction">
-    <xs:complexContent>
-      <xs:extension base="ActionSingleTarget_Type" />
-    </xs:complexContent>
-  </xs:complexType>
-
-  <xs:complexType name="CustomAction">
-    <xs:complexContent>
-      <xs:extension base="ActionSingleTarget_Type">
-        <xs:sequence>
-          <!--
-          VALIDITY:
-          - Difficult/Impossible to validate.
-          -->
-          <xs:element name="Script" type="xs:string" />
-        </xs:sequence>
-      </xs:extension>
-    </xs:complexContent>
-  </xs:complexType>
-  <xs:complexType name="ConfigHwAction">
-    <xs:complexContent>
-      <xs:extension base="ActionSingleTarget_Type">
-        <xs:sequence>
-          <xs:element name="ProcessorCount" type="xs:unsignedByte" minOccurs="0" maxOccurs="1"/>
-          <xs:element name="MemoryBytes" type="xs:unsignedLong" minOccurs="0" maxOccurs="1"/>
-          <xs:element name="NetworkAdapters" minOccurs="0" maxOccurs="1">
-            <xs:complexType>
-              <xs:sequence>
-                <xs:element name="NetworkAdapter" type="string_notEmpty" minOccurs="0" maxOccurs="2" />
-              </xs:sequence>
-            </xs:complexType>
-          </xs:element>
-        </xs:sequence>
-      </xs:extension>
-    </xs:complexContent>
-  </xs:complexType>
-
-  <xs:complexType name="TakeCheckpointAction">
-    <xs:complexContent>
-      <xs:extension base="Action_Type">
-        <xs:sequence>
-          <xs:element name="CheckpointName" type="string_notEmpty" />          
-        </xs:sequence>
-      </xs:extension>
-    </xs:complexContent>
-  </xs:complexType>
 
   <xs:complexType name="ConfigRdpAction">
     <xs:complexContent>
@@ -319,11 +313,26 @@
     </xs:complexContent>
   </xs:complexType>
 
-  <xs:complexType name="CleanAction">
+  <xs:complexType name="SaveIfNeededAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type" />
     </xs:complexContent>
   </xs:complexType>
+  <xs:complexType name="StopAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+  <xs:complexType name="TakeCheckpointAction">
+    <xs:complexContent>
+      <xs:extension base="Action_Type">
+        <xs:sequence>
+          <xs:element name="CheckpointName" type="xs:string" />          
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+
   <xs:complexType name="ReplaceCheckpointAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type" />
