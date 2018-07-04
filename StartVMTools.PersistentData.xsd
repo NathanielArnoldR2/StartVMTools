@@ -1,0 +1,31 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<xs:schema xmlns:xs="http://www.w3.org/2001/XMLSchema">
+  <!-- GENERAL - NULLABLES AND NOT-EMPTIES -->
+  <xs:simpleType name="string_notEmpty">
+    <xs:restriction base='xs:string'>
+      <xs:minLength value='1'/>
+    </xs:restriction>
+  </xs:simpleType>
+  
+  <!-- DATA -->
+  <xs:element name="Data">
+    <xs:complexType>
+      <xs:sequence>
+        <xs:element name="LastConfigurationName" type="string_notEmpty" />
+        <xs:element name="LastActionSetContext">
+          <xs:simpleType>
+            <xs:restriction base="xs:string">
+              <xs:enumeration value="Config" />
+              <xs:enumeration value="Start" />
+              <xs:enumeration value="Test" />
+              <xs:enumeration value="Save" />
+              <xs:enumeration value="Restore" />
+              <xs:enumeration value="Update" />
+            </xs:restriction>
+          </xs:simpleType>
+        </xs:element>
+        <xs:element name="LastProcessed" type="xs:dateTime" />
+      </xs:sequence>
+    </xs:complexType>
+  </xs:element>
+</xs:schema>

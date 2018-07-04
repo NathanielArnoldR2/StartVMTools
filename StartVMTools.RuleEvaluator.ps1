@@ -228,7 +228,12 @@ function Invoke-EvaluationRules {
   )
   try {
     $nsm = [System.Xml.XmlNamespaceManager]::new($Xml.NameTable)
-    $nsm.AddNamespace("xsi", $Xml.Configuration.xsi)
+
+    # Generalized from an explicit "Configuration" element to support
+    # the "Data" element used by PersistentData.
+    if ($xml.DocumentElement.xsi -is [string]) {
+      $nsm.AddNamespace("xsi", $Xml.DocumentElement.xsi)
+    }
 
     foreach ($rule in $Rules) {
       $nodeList = $Xml.SelectNodes($rule.XPath, $nsm)

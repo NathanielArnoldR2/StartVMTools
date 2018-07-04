@@ -71,6 +71,12 @@ $configRdpNullables = {
   }
 }
 
+rule -Individual /Configuration/Name $constrainedString @{
+  Pattern   = "^[A-Za-z0-9 ]+$"
+  MinLength = 1
+  MaxLength = 20
+}
+
 #region /Configuration/Members
 rule -Individual /Configuration/Members/Member/@Name $constrainedString $memberNameConstraint
 rule -Aggregate /Configuration/Members/Member/@Name $uniqueness
@@ -87,8 +93,13 @@ rule -Aggregate /Configuration/ActionSets/ActionSet/@Context $uniqueness
 rule -Individual /Configuration/ActionSets/ActionSet/@UseEnhancedSessionMode {
   $context = $node.SelectSingleNode("..").Context
 
+  $applicableContexts = @(
+    "Start"
+    "Restore"
+  )
+
   # Unless Enhanced Session Mode is explicitly indicated, it is disabled.
-  if ($nodeValue.Length -eq 0 -and $context -eq 'Start') {
+  if ($nodeValue.Length -eq 0 -and $context -in $applicableContexts) {
     $node.$valProp = 'false'
   }
 
@@ -100,8 +111,8 @@ rule -Individual /Configuration/ActionSets/ActionSet/@UseEnhancedSessionMode {
   # Schema restricts possible non-empty values to 'true' and 'false'.
   # Regardless, since neither of these values are applicable to
   # contexts -ne 'Start', we throw an error.
-  elseif ($context -ne 'Start') {
-    throw "The 'UseEnhancedSessionMode' setting is relevant only for 'Start' context actionsets, and should not be specified for other contexts."
+  elseif ($context -notin $applicableContexts) {
+    throw "The 'UseEnhancedSessionMode' setting is relevant only for 'Start' and 'Restore' context actionsets, and should not be specified otherwise."
   }
 }
 
@@ -299,7 +310,7 @@ rule -Aggregate "/Configuration/ActionSets/ActionSet[$i_actionSet]/Actions/Actio
 
 #endregion
 
-#region Restrictions on Actions and Members per-Context.
+#region Restrictions on Actions and Members per-Context
 
 # Ideally, the actions content of each actionset context would be validated
 # more precisely, but I haven't found a way to do it that wouldn't be super

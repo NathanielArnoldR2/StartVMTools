@@ -1,9 +1,14 @@
 <#
 
-@TODO: Shift credential inheritance from Validity to Readiness.
+@TODO:
 
-For conceptual and practical reasons, credential inheritance is better placed
-in Readiness than Validity steps.
+Develop a way to detect absent parameters in an advanced function without
+having to know their names. E.G. compare the set of all valid parameters
+for a context against the PSBoundParameters hashtable.
+
+Useful for "protecting" PersistentData.ConfigurationCommand against an
+intentionally malformed xml, preventing an unwanted mandatory parameter
+prompt.
 
 #>
 
@@ -20,6 +25,7 @@ $resources.ToolsetConfigSchema  = [System.Xml.Schema.XmlSchema]::Read(
 $resources.ToolsetConfigCommand = [scriptblock]::Create((
   Get-Content -LiteralPath $PSScriptRoot\StartVMTools.ToolsetConfig.ConfigurationCommand.ps1 -Raw
 ))
+
 $resources.ActionsConfigSchema = [System.Xml.Schema.XmlSchema]::Read(
   [System.Xml.XmlNodeReader]::new(
     [xml](Get-Content -LiteralPath $PSScriptRoot\StartVMTools.xsd -Raw)
@@ -30,6 +36,23 @@ $resources.ActionsConfigCommands = [scriptblock]::Create((
   Get-Content -LiteralPath $PSScriptRoot\StartVMTools.ConfigurationCommands.ps1 -Raw
 ))
 
+$resources.RuleEvaluator = [scriptblock]::Create(
+  (Get-Content -LiteralPath $PSScriptRoot\StartVMTools.RuleEvaluator.ps1 -Raw)
+)
+
+$resources.PersistentDataSchema = [System.Xml.Schema.XmlSchema]::Read(
+  [System.Xml.XmlNodeReader]::new(
+    [xml](Get-Content -LiteralPath $PSScriptRoot\StartVMTools.PersistentData.xsd -Raw)
+  ),
+  $null
+)
+$resources.PersistentDataCommand = [scriptblock]::Create((
+  Get-Content -LiteralPath $PSScriptRoot\StartVMTools.PersistentData.ConfigurationCommand.ps1 -Raw
+))
+$resources.PersistentDataRules = [scriptblock]::Create((
+  Get-Content -LiteralPath $PSScriptRoot\StartVMTools.PersistentData.Rules.ps1 -Raw
+))
+
 $credPath = "$PSScriptRoot\StartVMTools.FallbackCredentials.ps1"
 
 $resources.FallbackCredentials = @()
@@ -38,10 +61,6 @@ if (Test-Path -LiteralPath $credPath) {
     & $credPath
   )
 }
-
-$resources.RuleEvaluator = [scriptblock]::Create(
-  (Get-Content -LiteralPath $PSScriptRoot\StartVMTools.RuleEvaluator.ps1 -Raw)
-)
 
 $resources.ToolsetConfigRules = [scriptblock]::Create(
   (Get-Content -LiteralPath $PSScriptRoot\StartVMTools.ToolsetConfig.Rules.ps1 -Raw)
@@ -708,6 +727,146 @@ function Test-StartVMActionsConfiguration {
 }
 #endregion
 
+#region Persistent data handling
+function Read-StartVMPersistentData {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $Path,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $ConfigurationName,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $ActionSetContext
+  )
+  try {
+    if ($ActionSetContext -ne "Save") {
+      if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Force
+      }
+
+      return
+    }
+
+    Write-Verbose "Processing persistent data file on vm host."
+
+    if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+      throw "A persistent data file was not found at the expected path. This file must exist at this path for a 'Save'-context actionset to proceed. Run an actionset of any other context to generate this file."
+    }
+
+    try {
+      $data = Import-Clixml -LiteralPath $Path
+
+      if ($data -isnot [hashtable]) {
+        throw "Object retrieved from CliXml was not a hashtable."
+      }
+
+      . $script:resources.PersistentDataCommand
+
+      $data = New-StartVMPersistentData @data
+
+      if ($data -isnot [System.Xml.XmlElement]) {
+        throw "Object emitted by configuration command was not an XmlElement, as expected."
+      }
+
+      $TestXml = $data.OwnerDocument.OuterXml -as [xml]
+      $TestXml.Schemas.Add($script:resources.PersistentDataSchema) |
+        Out-Null
+
+      try {
+        $TestXml.Validate($null)
+      } catch {
+        $exception = [System.Exception]::new(
+          "Error while validating persistent data to schema. See InnerException for more details.",
+          $_.Exception
+        )
+
+        throw $exception
+      }
+
+      $TestXml = $data.OwnerDocument.OuterXml -as [xml]
+
+      . $script:resources.RuleEvaluator
+
+      New-Alias -Name rule -Value New-EvaluationRule
+
+      . $script:resources.PersistentDataRules
+
+      Remove-Item alias:\rule
+
+      Invoke-EvaluationRules -Xml $TestXml -Rules $Rules 
+    } catch {
+      Remove-Item -LiteralPath $Path -Force
+
+      $exception = [System.Exception]::new(
+        "Error while processing persistent data file. See InnerException for more details. File has been removed.",
+        $_.Exception
+      )
+
+      throw $exception
+    }
+
+    if ($data.LastConfigurationName -ne $ConfigurationName -or $data.LastActionSetContext -notin "Start","Restore") {
+      throw "A 'Save'-context actionset may only proceed when the last actionset run on this host was a 'Start' or 'Restore' for the same configuration name."
+    }
+
+    Remove-Item -LiteralPath $Path -Force
+
+  } catch {
+    $PSCmdlet.ThrowTerminatingError($_)
+  }
+}
+
+function Write-StartVMPersistentData {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $Path,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $ConfigurationName,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $ActionSetContext
+  )
+  try {
+    Write-Verbose "Writing persistent data file on vm host."
+
+    @{
+      LastConfigurationName = $ConfigurationName
+      LastActionSetContext  = $ActionSetContext
+      LastProcessed         = [datetime]::Now
+    } |
+      Export-Clixml -LiteralPath $Path
+  } catch {
+    $PSCmdlet.ThrowTerminatingError($_)
+  }
+}
+#endregion
+
 #region Config resolution & transformation; environment preparation
 function Resolve-StartVMActionsConfiguration {
   [CmdletBinding(
@@ -818,70 +977,70 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
   )
 
   $context = $Action.SelectSingleNode("../..").Context
-
+  
   $goodSnapshotStates = @(
-    "Off"
-  )
-
+      "Off"
+    )
+  
   if ($context -eq "Start") {
-    $checkpointNameBase = "Class-Ready Configuration"
-  }
+      $checkpointNameBase = "Class-Ready Configuration"
+    }
   elseif ($context -eq "Restore") {
-    $checkpointNameBase = "Mid-Class Configuration"
-    $goodSnapshotStates += "Saved"
-  }
-
+      $checkpointNameBase = "Mid-Class Configuration"
+      $goodSnapshotStates += "Saved"
+    }
+  
   foreach ($item in $Action.SelectNodes("CheckpointMap/CheckpointMapItem")) {
     $member = $Members |
                 Where-Object Name -eq $item.Target
-
+  
     if ($member.Present -ne 'true') {
-      $item.ParentNode.RemoveChild($item)
-      continue
-    }
-
+        $item.ParentNode.RemoveChild($item)
+        continue
+      }
+  
     $vmSnapshots = @(
-      Get-VM -Id $member.VMId |
-        Get-VMSnapshot
-    )
-
+        Get-VM -Id $member.VMId |
+          Get-VMSnapshot
+      )
+  
     if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config") {
-      $targetSnapshot = @(
-        $vmSnapshots |
-          Where-Object ParentSnapshotId -eq $null
-      )
-    }
+        $targetSnapshot = @(
+          $vmSnapshots |
+            Where-Object ParentSnapshotId -eq $null
+        )
+      }
     elseif ($context -eq "Start") {
-      $targetSnapshot = @(
-        $vmSnapshots |
-          Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
-      )
-    }
-    elseif ($context -eq "Restore") {
-      $targetSnapshot = @(
-        $vmSnapshots |
-          Where-Object ParentSnapshotName -eq "Class-Ready Configuration ($($item.CheckpointName))" |
-          Where-Object Name -eq $checkpointNameBase
-      )
-
-      if ($targetSnapshot.Count -eq 0) {
         $targetSnapshot = @(
           $vmSnapshots |
             Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
         )
       }
-    }
-
+    elseif ($context -eq "Restore") {
+        $targetSnapshot = @(
+          $vmSnapshots |
+            Where-Object ParentSnapshotName -eq "Class-Ready Configuration ($($item.CheckpointName))" |
+            Where-Object Name -eq $checkpointNameBase
+        )
+    
+        if ($targetSnapshot.Count -eq 0) {
+          $targetSnapshot = @(
+            $vmSnapshots |
+              Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
+          )
+        }
+      }
+  
     if ($targetSnapshot.Count -ne 1) {
       throw "Expected to find exactly one checkpoint matching '$context' '$($item.CheckpointName)' specification for member '$($member.Name)', but found $($targetSnapshot.Count)."
     }
-
+  
     $targetSnapshot = $targetSnapshot[0]
-
+  
     if ($targetSnapshot.State -notin $goodSnapshotStates) {
       throw "Targeted snapshot had invalid state '$($targetSnapshot.State)'."
     }
-
+  
     $item.SetAttribute("VMId", $member.VMId)
     $item.SetAttribute("CheckpointId", $targetSnapshot.Id)
   }
@@ -1020,7 +1179,9 @@ function Resolve-StartVMActionsConfiguration_EachAction_TakeCheckpoint {
       & $handlerName -Action $Action -Members $members
     }
   } catch {
-    $PSCmdlet.ThrowTerminatingError($_)
+    # Simply re-throwing, because using $PSCmdlet.ThrowTerminatingError just
+    # fails silently at this juncture.
+    throw $_
   }
 }
 
@@ -2257,6 +2418,23 @@ function Invoke-StartVM {
 
     $resultObj."Resolved Actions Configuration" = $ActionSet
 
+    # Criteria: Must be in a path automatically created where the Hyper-V role
+    # is enabled/installed, readable/writable by Hyper-V Administrators.
+    $PersistentDataPath = "C:\Users\Public\Documents\Hyper-V\StartVMTools.PersistentData.xml"
+
+    # PersistentData is retrieved, validated on its own merits, and used for
+    # its intended purpose (to limit circumstances in which a Save-context
+    # actionset may be run) all within this function. It needs only the
+    # path to the data and the current configuration name and actionset
+    # context to do so, and thus *could* be placed far earlier. When
+    # run, however, it will in many circumstances delete persistent
+    # data after retrieving it, and thus should be placed after
+    # any juncture where failure may be expected.
+    Read-StartVMPersistentData `
+    -Path $PersistentDataPath `
+    -ConfigurationName $ActionsConfig.Name `
+    -ActionSetContext $Context
+
     $resultObj."Processing Status" = "Preparing vm host for configuration start."
 
     Stop-StartVMNonMembers -ActionSet $ActionSet -ToolsetConfig $ToolsetConfig
@@ -2272,6 +2450,11 @@ function Invoke-StartVM {
 
     $ActionSet.SelectNodes("Actions/Action") |
       Invoke-StartVMAction -RuntimeConfig $RuntimeConfig
+
+    Write-StartVMPersistentData `
+    -Path $PersistentDataPath `
+    -ConfigurationName $ActionsConfig.Name `
+    -ActionSetContext $Context
 
     $resultObj."End Time" = [datetime]::Now
     $resultObj."Duration" = $resultObj."End Time" - $resultObj."Start Time"
