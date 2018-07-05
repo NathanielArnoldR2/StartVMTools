@@ -4,11 +4,15 @@
 
 Develop a way to detect absent parameters in an advanced function without
 having to know their names. E.G. compare the set of all valid parameters
-for a context against the PSBoundParameters hashtable.
+for a ParameterSetName against the PSBoundParameters hashtable.
 
 Useful for "protecting" PersistentData.ConfigurationCommand against an
 intentionally malformed xml, preventing an unwanted mandatory parameter
 prompt.
+
+@TODO
+
+Code handling for Clean, Custom, and ReplaceCheckpoint type actions.
 
 #>
 
@@ -542,7 +546,7 @@ function Resolve-StartVMRuntimeConfiguration {
 
     $result = $Host.UI.PromptForChoice(
       $null,
-      "Would you like to run a test of this 'Update' configuration that will not overwrite the current top checkpoint",
+      "Would you like to run a test of this 'Update' that will not overwrite the current top checkpoint?",
       $choices,
       0
     )
@@ -979,57 +983,57 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
   $context = $Action.SelectSingleNode("../..").Context
   
   $goodSnapshotStates = @(
-      "Off"
-    )
+    "Off"
+  )
   
   if ($context -eq "Start") {
-      $checkpointNameBase = "Class-Ready Configuration"
-    }
+    $checkpointNameBase = "Class-Ready Configuration"
+  }
   elseif ($context -eq "Restore") {
-      $checkpointNameBase = "Mid-Class Configuration"
-      $goodSnapshotStates += "Saved"
-    }
+    $checkpointNameBase = "Mid-Class Configuration"
+    $goodSnapshotStates += "Saved"
+  }
   
   foreach ($item in $Action.SelectNodes("CheckpointMap/CheckpointMapItem")) {
     $member = $Members |
                 Where-Object Name -eq $item.Target
   
     if ($member.Present -ne 'true') {
-        $item.ParentNode.RemoveChild($item)
-        continue
-      }
+      $item.ParentNode.RemoveChild($item)
+      continue
+    }
   
     $vmSnapshots = @(
-        Get-VM -Id $member.VMId |
-          Get-VMSnapshot
-      )
+      Get-VM -Id $member.VMId |
+        Get-VMSnapshot
+    )
   
-    if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config") {
-        $targetSnapshot = @(
-          $vmSnapshots |
-            Where-Object ParentSnapshotId -eq $null
-        )
-      }
+    if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config","Update") {
+      $targetSnapshot = @(
+        $vmSnapshots |
+          Where-Object ParentSnapshotId -eq $null
+      )
+    }
     elseif ($context -eq "Start") {
+      $targetSnapshot = @(
+        $vmSnapshots |
+          Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
+      )
+    }
+    elseif ($context -eq "Restore") {
+      $targetSnapshot = @(
+        $vmSnapshots |
+          Where-Object ParentSnapshotName -eq "Class-Ready Configuration ($($item.CheckpointName))" |
+          Where-Object Name -eq $checkpointNameBase
+      )
+    
+      if ($targetSnapshot.Count -eq 0) {
         $targetSnapshot = @(
           $vmSnapshots |
             Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
         )
       }
-    elseif ($context -eq "Restore") {
-        $targetSnapshot = @(
-          $vmSnapshots |
-            Where-Object ParentSnapshotName -eq "Class-Ready Configuration ($($item.CheckpointName))" |
-            Where-Object Name -eq $checkpointNameBase
-        )
-    
-        if ($targetSnapshot.Count -eq 0) {
-          $targetSnapshot = @(
-            $vmSnapshots |
-              Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
-          )
-        }
-      }
+    }
   
     if ($targetSnapshot.Count -ne 1) {
       throw "Expected to find exactly one checkpoint matching '$context' '$($item.CheckpointName)' specification for member '$($member.Name)', but found $($targetSnapshot.Count)."
@@ -1573,6 +1577,22 @@ function Invoke-StartVMAction_Clean {
     $RuntimeConfig
   )
   process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -ne "Off") {
+      throw "This action requires the vm be in an 'Off' state."
+    }
+
+    $currentCheckpoint = Get-VMSnapshot -Id $vm.ParentSnapshotId
+
+    if ($currentCheckpoint.ParentSnapshotId -ne $null) {
+      throw "This action requires the vm first be reverted to its top checkpoint."
+    }
+
+    $vm |
+      Get-VMSnapshot |
+      Where-Object ParentSnapshotId -eq $currentCheckpoint.Id |
+      Remove-VMSnapshot -IncludeAllChildSnapshots
   }
 }
 
@@ -1655,6 +1675,23 @@ function Invoke-StartVMAction_Custom {
     $RuntimeConfig
   )
   process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -ne "Off") {
+      throw "This action requires the vm be in an 'Off' state."
+    }
+
+    $pl = $Host.Runspace.CreateNestedPipeline()
+    $cmd = [System.Management.Automation.Runspaces.Command]::new('param($VM)', $true)
+    $cmd.Parameters.Add(
+      [System.Management.Automation.Runspaces.CommandParameter]::new(
+        'VM',
+        $vm
+      )
+    )
+    $pl.Commands.Add($cmd)
+    $pl.Commands.AddScript($Action.Script)
+    $pl.Invoke() | Out-Null
   }
 }
 
@@ -2141,6 +2178,28 @@ function Invoke-StartVMAction_ReplaceCheckpoint {
     $RuntimeConfig
   )
   process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -ne "Off") {
+      throw "This action requires the vm be in an 'Off' state."
+    }
+
+    $currentCheckpoint = Get-VMSnapshot -Id $vm.ParentSnapshotId
+
+    if ($currentCheckpoint.ParentSnapshotId -ne $null) {
+      throw "This action requires the vm first be reverted to its top checkpoint."
+    }
+
+    $vm |
+      Checkpoint-VM -SnapshotName "Known Good Configuration"
+
+    Write-Verbose "  - Deleting existing top checkpoint and waiting for vhd merge."
+
+    Remove-VMSnapshot -VMSnapshot $currentCheckpoint -Confirm:$false
+
+    do {
+      Start-Sleep -Seconds 1
+    } until ((Get-VM -Id $vm.Id).Status -eq "Operating normally")
   }
 }
 
