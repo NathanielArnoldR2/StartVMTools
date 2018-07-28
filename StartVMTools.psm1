@@ -10,10 +10,6 @@ Useful for "protecting" PersistentData.ConfigurationCommand against an
 intentionally malformed xml, preventing an unwanted mandatory parameter
 prompt.
 
-@TODO
-
-Code handling for Clean, Custom, and ReplaceCheckpoint type actions.
-
 #>
 
 . $PSScriptRoot\StartVMTools.WriteOutputTime.ps1
@@ -1099,7 +1095,7 @@ function Resolve-StartVMActionsConfiguration_EachAction_ConfigHw {
     throw "A maximum of $([System.Math]::Floor($memBytesMax / 1gb))gb memory may be assigned to a vm on this host."
   }
 
-  foreach ($adapter in $Action.SelectNodes("NetworkAdapters/NetworkAdapter")) {
+  foreach ($adapter in $Action.SelectSingleNode("NetworkAdapters").NetworkAdapter) {
     if ($adapter -eq 'none') {
       continue
     }
