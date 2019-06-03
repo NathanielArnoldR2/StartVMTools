@@ -74,7 +74,17 @@ $resources.ReadinessRules = [scriptblock]::Create(
 )
 
 $resources.InjectScripts = @{}
-$resources.InjectScripts.InitResources = {
+$resources.InjectScripts.InitLocalPaths = {
+  $localPaths = @{
+    CTRoot = Join-Path -Path $env:SystemDrive -ChildPath CT
+  }
+  $localPaths.Modules = Join-Path -Path $localPaths.CTRoot -ChildPath Modules
+  $localPaths.Packages = Join-Path -Path $localPaths.CTRoot -ChildPath Packages
+}
+$resources.InjectScripts.InitOnlineResources = {
+  if (Test-Path -LiteralPath $localPaths.CTRoot) {
+    throw "The resource destination path already exists @ '$($localPaths.CTRoot)' on the vm. Any successful configuration should have removed this path."
+  }
 
   $startTime = Get-Date
 
@@ -108,15 +118,6 @@ $resources.InjectScripts.InitResources = {
     }
   }
 
-  if (Test-Path -LiteralPath C:\CT) {
-    throw "The resource destination path already exists @ 'C:\CT' on the vm. Any successful configuration should have removed this path."
-  }
-
-  $localPaths = @{
-    Modules  = "C:\CT\Modules"
-    Packages = "C:\CT\Packages"
-  }
-
   New-Item -Path $localPaths.Modules -ItemType Directory -Force |
     Out-Null
 
@@ -133,22 +134,44 @@ $modules |
     Import-Module "$PSScriptRoot\$_\$_.psm1"
   }
 
-$preferLocalPackages = %PREFERLOCALPACKAGES%
-
-if ($modules -contains "CTPackage" -and $preferLocalPackages) {
+if ($modules -contains "CTPackage") {
   Add-CTPackageSource -Name Local  -Path "%PACKAGELOCAL%"
   Add-CTPackageSource -Name Remote -Path "%PACKAGESHARE%"
 }
-elseif ($modules -contains "CTPackage") {
-  Add-CTPackageSource -Name Remote -Path "%PACKAGESHARE%"
+
+}.ToString().
+  Trim().
+  Replace("%PACKAGELOCAL%", $localPaths.Packages).
+  Replace("%PACKAGESHARE%", $sharePaths.Packages)
+
+  $importPath = New-Item -Path $localPaths.Modules -Name import.ps1 -Value $importScript |
+                  ForEach-Object FullName
+
+  . $importPath
+
+  if ($Error.Count -gt 0) {
+    throw "Terminating due to unexpected error."
+  }
+}
+$resources.InjectScripts.InitOfflineResources = {
+
+$importScript = {
+
+$modules = Get-ChildItem -LiteralPath $PSScriptRoot -Directory |
+             ForEach-Object Name
+
+$modules |
+  ForEach-Object {
+    Import-Module "$PSScriptRoot\$_\$_.psm1"
+  }
+
+if ($modules -contains "CTPackage") {
   Add-CTPackageSource -Name Local  -Path "%PACKAGELOCAL%"
 }
 
 }.ToString().
   Trim().
-  Replace("%PREFERLOCALPACKAGES%", "`$$($params.PreferLocalPackages.ToString().ToLower())").
-  Replace("%PACKAGELOCAL%", $localPaths.Packages).
-  Replace("%PACKAGESHARE%", $sharePaths.Packages)
+  Replace("%PACKAGELOCAL%", $localPaths.Packages)
 
   $importPath = New-Item -Path $localPaths.Modules -Name import.ps1 -Value $importScript |
                   ForEach-Object FullName
@@ -162,28 +185,55 @@ elseif ($modules -contains "CTPackage") {
 $resources.InjectScripts.RunAsUser = {
 
   function Register-ConfigTaskInUserSession {
+    [CmdletBinding(
+      PositionalBinding = $false
+    )]
     param(
       [Parameter(
-        Mandatory = $true
+        Mandatory = $true,
+        Position = 0
       )]
       [scriptblock]
-      $Task
-    )
+      $Task,
 
-    $encodedCommand = [Convert]::ToBase64String(
-      [System.Text.Encoding]::Unicode.GetBytes($Task.ToString())
+      [switch]
+      $Wait
     )
+    try {
+      $encodedCommand = [Convert]::ToBase64String(
+        [System.Text.Encoding]::Unicode.GetBytes($Task.ToString().Trim())
+      )
+      
+      $params = @{
+        TaskName  = "Start"
+        Principal = New-ScheduledTaskPrincipal   -GroupId BUILTIN\Users
+        Action    = New-ScheduledTaskAction      -Execute "C:\Windows\System32\WindowsPowershell\v1.0\powershell.exe" -Argument "/EncodedCommand $encodedCommand"
+        Settings  = New-ScheduledTaskSettingsSet -Priority 4 # 4 is Normal Priority. Default of 7 is Below Normal.
+        Trigger   = New-ScheduledTaskTrigger     -At (Get-Date).AddMinutes(2) -Once # Long enough to be sure user has (auto) signed in.
+      }
+      
+      $scheduledTask = Register-ScheduledTask @params
+      
+      if ($Wait) {
+        do {
+          Start-Sleep -Seconds 60
+      
+          $info = $scheduledtask |
+                          Get-ScheduledTaskInfo
 
-    $params = @{
-      TaskName  = "Start"
-      Principal = New-ScheduledTaskPrincipal   -GroupId BUILTIN\Users
-      Action    = New-ScheduledTaskAction      -Execute "C:\Windows\System32\WindowsPowershell\v1.0\powershell.exe" -Argument "/EncodedCommand $encodedCommand"
-      Settings  = New-ScheduledTaskSettingsSet -Priority 4 # 4 is Normal Priority. Default of 7 is Below Normal.
-      Trigger   = New-ScheduledTaskTrigger     -At (Get-Date).AddMinutes(2) -Once # Long enough to be sure user has (auto) signed in.
+          # Task result with bitmask 0x41300 reflects status of the task
+          # *construct*, rather than that of the task itself. For example,
+          # 0x41303 is a task that has not run, while 0x41301 is a task
+          # in progress.
+        } until (($info.LastTaskResult -band 0x41300) -ne 0x41300)
+      
+        if ($info.LastTaskResult -ne 0) {
+          throw "Task in user session returned unexpected result code $($info.LastTaskResult)."
+        }
+      }
+    } catch {
+      $PSCmdlet.ThrowTerminatingError($_)
     }
-
-    Register-ScheduledTask @params |
-      Out-Null
   }
   New-Alias -Name runAsUser -Value Register-ConfigTaskInUserSession
 
@@ -236,7 +286,7 @@ function Get-StartVMToolsetConfiguration {
     $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
     $rs.Open()
 
-    $rs.CreatePipeline('$config = @{}').Invoke() | Out-Null
+    $rs.CreatePipeline('$config = @{}; $config.Resources = @{}; $config.Resources.Online = @{}; $config.Resources.Offline = @{}').Invoke() | Out-Null
 
     try {
       $rs.CreatePipeline((Get-Content -LiteralPath $ToolsetConfigPath -Raw -ErrorAction Stop)).Invoke() | Out-Null
@@ -379,6 +429,7 @@ function Select-StartVMActionSetContext {
     "Save"
     "Restore"
     "Update"
+    "Custom"
   )
 
   $ContextsInConfiguration = @(
@@ -614,6 +665,16 @@ function Resolve-StartVMRuntimeConfiguration {
     }
   }
 
+  $usesOfflineServicing = @(
+    $actionSet.
+      Actions.
+      Action.
+      Where({$_.Type -eq "CustomAction"}).
+      Where({
+        $_.OfflineServicing -eq "true"
+      })
+  ).Count -gt 0
+
   $usesResourceServer = @(
     $actionSet.
       Actions.
@@ -625,10 +686,27 @@ function Resolve-StartVMRuntimeConfiguration {
       })
   ).Count -gt 0
 
-  if ($usesResourceServer) {
+  if ($usesOfflineServicing -or ($usesResourceServer -and $ToolsetConfig.Resources.ApplyMode -eq "Offline")) {
+    Write-Verbose "  - Verifying elevated context for offline servicing."
+
+    # Is the principal derived from the current Windows identity an *elevated*
+    # administrator?
+    $scriptIsElevated =
+    [System.Security.Principal.WindowsPrincipal]::new(
+      [System.Security.Principal.WindowsIdentity]::GetCurrent()
+    ).IsInRole(
+      [System.Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+
+    if (-not $scriptIsElevated) {
+      throw "The script must be run elevated to service vm resources mounted offline."
+    }
+  }
+
+  if ($usesResourceServer -and $ToolsetConfig.Resources.ApplyMode -eq "Online") {
     Write-Verbose "  - Selecting and validating resource server for modules and packages."
 
-    $serverOptions = $ToolsetConfig.SelectNodes("ResourceServerOptions/ResourceServerOption") |
+    $serverOptions = $ToolsetConfig.SelectNodes("Resources/Online/ServerOptions/ServerOption") |
                        ForEach-Object InnerXml
 
     if ($serverOptions.Count -eq 0) {
@@ -651,7 +729,7 @@ function Resolve-StartVMRuntimeConfiguration {
       Start-Sleep -Seconds 60
     }
 
-    if ($ToolsetConfig.TestResourceShares -eq 'false') {
+    if ($ToolsetConfig.Resources.Online.TestShares -eq 'false') {
       Write-Warning "    - Skipped share validation."
     }
     else {
@@ -677,7 +755,7 @@ function Resolve-StartVMRuntimeConfiguration {
         }
 
         if (((Get-Date) - $shareStartTime).TotalMinutes -ge 5 -and (-not $showedHint)) {
-          Write-Verbose "    - HINT: Try running with toolsetconfig testresourceshares set to '`$false'!"
+          Write-Verbose "    - HINT: Try running with toolsetconfig.resources.online.testshares set to '`$false'!"
           $showedHint = $true
         }
 
@@ -690,6 +768,51 @@ function Resolve-StartVMRuntimeConfiguration {
     }
 
     $RuntimeConfig.ResourceServer = $server
+  } elseif ($usesResourceServer -and $ToolsetConfig.Resources.ApplyMode -eq "Offline") {
+    Write-Verbose "  - Validating offline source paths for modules and packages."
+
+    function Test-StartVMOfflineSourcePath {
+      param(
+        [Parameter(
+          Mandatory = $true
+        )]
+        [string]
+        $Path
+      )
+      try {
+        if (-not (Test-Path -LiteralPath $Path -ErrorAction Stop)) {
+          return $false
+        }
+
+        $item = Get-Item -LiteralPath $Path -ErrorAction Stop
+
+        if ($item -isnot [System.IO.DirectoryInfo]) {
+          return $false
+        }
+    
+        if ($Path -ne $item.FullName) {
+          return $false
+        }
+    
+        return $true
+      } catch {
+        $PSCmdlet.ThrowTerminatingError($_)
+      }
+    }
+
+    if (
+      $ToolsetConfig.Resources.Offline.ModulesSourcePath.Length -eq 0 -or
+      $ToolsetConfig.Resources.Offline.PackagesSourcePath.Length -eq 0
+    ) {
+      throw "Offline source paths for Modules and Packages must be defined when the selected actionset uses resources and apply mode is 'Offline'."
+    }
+
+    if (
+      (-not (Test-StartVMOfflineSourcePath $ToolsetConfig.Resources.Offline.ModulesSourcePath)) -or
+      (-not (Test-StartVMOfflineSourcePath $ToolsetConfig.Resources.Offline.PackagesSourcePath))
+    ) {
+      throw "Offline source paths for Modules and Packages must be rooted, direct paths to existing directories on a local volume or network share."
+    }
   }
 }
 
@@ -982,7 +1105,7 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
     "Off"
   )
   
-  if ($context -eq "Start") {
+  if ($context -in "Start","Custom") {
     $checkpointNameBase = "Class-Ready Configuration"
   }
   elseif ($context -eq "Restore") {
@@ -1004,13 +1127,13 @@ function Resolve-StartVMActionsConfiguration_EachAction_RestoreCheckpoint {
         Get-VMSnapshot
     )
   
-    if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config","Update") {
+    if ($item.CheckpointName.Length -eq 0 -and $context -in "Start","Config","Update","Custom") {
       $targetSnapshot = @(
         $vmSnapshots |
           Where-Object ParentSnapshotId -eq $null
       )
     }
-    elseif ($context -eq "Start") {
+    elseif ($context -in "Start","Custom") {
       $targetSnapshot = @(
         $vmSnapshots |
           Where-Object Name -eq "$checkpointNameBase ($($item.CheckpointName))"
@@ -1063,7 +1186,7 @@ function Resolve-StartVMActionsConfiguration_EachAction_Inject {
     $Members
   )
 
-  Resolve-StartVMActionsConfiguration_Credential -Node $ACtion
+  Resolve-StartVMActionsConfiguration_Credential -Node $Action
 }
 function Resolve-StartVMActionsConfiguration_EachAction_ConfigHw {
   [CmdletBinding(
@@ -1243,12 +1366,17 @@ function Resolve-StartVMActionsConfiguration_Credential {
         CreateElement("Credential")
       )
 
+      $credNode.SetAttribute("Domain", $cred.Domain)
       $credNode.SetAttribute("UserName", $cred.UserName)
       $credNode.SetAttribute("Password", $cred.Password)
     }
 
-    if ($credNode.UserName -ne $credNode.UserName.Trim()) {
-      throw "Credential UserName had leading or trailing whitespace."
+    if ($credNode.Domain -ne $credNode.Domain.Trim() -or $credNode.Domain -match "\\") {
+      throw "Credential Domain had leading or trailing whitespace or contained a backslash."
+    }
+
+    if ($credNode.UserName -ne $credNode.UserName.Trim() -or $credNode.UserName -match "\\") {
+      throw "Credential UserName had leading or trailing whitespace or contained a backslash."
     }
 
     if ($credNode.Password -ne $credNode.Password.Trim()) {
@@ -1426,6 +1554,150 @@ function Invoke-StartVMActionsTransform_RunUpdateAsTest {
       Resolve-StartVMActionsConfiguration_EachAction -Action $_
     }
 }
+function Invoke-StartVMActionsTransform_ApplyOffline {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ActionSet,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+
+  if ($ToolsetConfig.Resources.ApplyMode -ne "Offline") {
+    return
+  }
+
+  $usesResourceServer = @(
+    $ActionSet.
+      Actions.
+      Action.
+      Where({$_.Type -eq "InjectAction"}).
+      Where({
+        $_.UseResourceServer -eq "true" -or
+        $_.SelectNodes("Packages/Package").Count -gt 0
+      })
+  ).Count -gt 0
+
+  if (-not $usesResourceServer) {
+    return
+  }
+
+  Write-Verbose "Applying transform: Apply resources to offline image before start."
+
+  . $script:resources.ActionsConfigCommands
+
+  while ($true) {
+    $injectNode = $null
+    $injectNodeIndex = -1
+
+    foreach ($action in $ActionSet.SelectNodes("Actions/Action")) {
+      $injectNodeIndex++
+
+      if ($action.Type -ne "InjectAction") {
+        continue
+      }
+
+      if ($action.UseResourceServer -eq "false" -and $action.SelectNodes("Packages/Package").Count -eq 0) {
+        continue
+      }
+
+      if ($action.AddedApplyOfflineAction -eq "true") {
+        continue
+      }
+
+      $injectNode = $action
+    }
+
+    if ($null -eq $injectNode) {
+      break
+    }
+
+    # When populated, should be the index of the last Start action before the
+    # Inject action for the same target.
+    $startNodeIndex = $null
+
+    $i = -1
+
+    foreach ($action in $ActionSet.SelectNodes("Actions/Action")) {
+      $i++
+
+      if ($action.Type -ne "StartAction") {
+        continue
+      }
+
+      if ($action.VMId -ne $injectNode.VMId) {
+        continue
+      }
+
+      if ($i -ge $injectNodeIndex) {
+        break
+      }
+
+      $startNodeIndex = $i
+    }
+
+    if ($null -eq $startNodeIndex) {
+      throw "Failed to target 'start' corresponding to 'inject' action to insert apply offline action."
+    }
+
+    # When populated, should be the index of the last non-Start action (for any
+    # target) before the index populated above.
+    $nonStartNodeIndex = $null
+
+    $i = -1
+
+    foreach ($action in $ActionSet.SelectNodes("Actions/Action")) {
+      $i++
+
+      if ($action.Type -eq "StartAction") {
+        continue
+      }
+
+      if ($i -ge $startNodeIndex) {
+        break
+      }
+
+      $nonStartNodeIndex = $i
+    }
+
+    if ($null -eq $nonstartNodeIndex) {
+      throw "Failed to target node before 'start' corresponding to 'inject' action to insert apply offline action."
+    }
+
+    $ActionParams = @{
+      Target = $injectNode.Target
+    }
+
+    if ($injectNode.SelectNodes("Packages/Package").Count -gt 0) {
+      $ActionParams.Packages = @($injectNode.SelectNodes("Packages/Package") | ForEach-Object InnerXml)
+    }
+
+    $ActionSet |
+      Add-StartVMAction @(
+        act_applyOffline @ActionParams
+      ) -Index ($nonStartNodeIndex + 1) -PassThru |
+      ForEach-Object {
+        Resolve-StartVMActionsConfiguration_EachAction -Action $_
+      }
+
+    $injectNode.SetAttribute("AddedApplyOfflineAction", "true")
+  }
+}
 
 function Stop-StartVMNonMembers {
   [CmdletBinding(
@@ -1514,6 +1786,12 @@ function Invoke-StartVMAction_RestoreCheckpoint {
     [Parameter(
       Mandatory = $true
     )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
     [PSCustomObject]
     $RuntimeConfig
   )
@@ -1532,6 +1810,14 @@ function Invoke-StartVMAction_RestoreCheckpoint {
 
       Get-VMSnapshot -Id $item.CheckpointId |
         Restore-VMSnapshot -Confirm:$false
+
+      # A "clean" action will use the ParentSnapshotId property to ensure
+      # the top checkpoint is applied before it proceeds. I've seen some
+      # errors from this failsafe that likely indicate the property has
+      # not updated in time, hence this manual check.
+      do {
+        Start-Sleep -Milliseconds 250
+      } until ((Get-VM -Id $vm.Id).ParentSnapshotId -eq $item.CheckpointId)
     }
 
     if ($context -ne "Restore") {
@@ -1565,6 +1851,12 @@ function Invoke-StartVMAction_Clean {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -1603,6 +1895,12 @@ function Invoke-StartVMAction_ConfigHw {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -1667,6 +1965,12 @@ function Invoke-StartVMAction_Custom {
     [Parameter(
       Mandatory = $true
     )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
     [PSCustomObject]
     $RuntimeConfig
   )
@@ -1675,6 +1979,83 @@ function Invoke-StartVMAction_Custom {
 
     if ($vm.State -ne "Off") {
       throw "This action requires the vm be in an 'Off' state."
+    }
+
+    if ($Action.OfflineServicing -eq 'true') {
+
+      $vhdPath = $vm |
+                   Get-VMHardDiskDrive |
+                   Select-Object -First 1 |
+                   ForEach-Object Path
+
+      $partition = Mount-VHD -Path $vhdPath -Passthru |
+                     Get-Partition |
+                     Where-Object Size -gt 1gb
+
+      $volumeRoot = $partition |
+                      ForEach-Object {$_.DriveLetter + ":\"}
+
+      do {
+        Start-Sleep -Milliseconds 250
+      } until ((Get-PSDrive | Where-Object Root -eq $volumeRoot) -ne $null)
+
+      $ImageRootName = "VHD" # Set to 'IMG' for direct transferral of code to Offline Servicing scripts.
+      $ImageRoot = $volumeRoot
+
+      function New-PSDriveObj ($Name, $PSProvider, $Root, $Description) {
+        [PSCustomObject]@{
+          Name        = $Name
+          PSProvider  = $PSProvider
+          Root        = $Root
+          Description = $Description
+        }
+      }
+
+      $drives = @(
+        New-PSDriveObj -Name $ImageRootName `
+                       -PSProvider FileSystem `
+                       -Root $ImageRoot `
+                       -Description "FileSystem Root"
+
+        New-PSDriveObj -Name "$($ImageRootName)_REG_SYS" `
+                       -PSProvider Registry `
+                       -Root (Join-Path -Path $ImageRoot -ChildPath Windows\System32\config\SYSTEM) `
+                       -Description "System Registry"
+        
+        New-PSDriveObj -Name "$($ImageRootName)_REG_SW" `
+                       -PSProvider Registry `
+                       -Root (Join-Path -Path $ImageRoot -ChildPath Windows\System32\config\SOFTWARE) `
+                       -Description "Software Registry"
+        
+        New-PSDriveObj -Name "$($ImageRootName)_REG_DEF" `
+                       -PSProvider Registry `
+                       -Root (Join-Path -Path $ImageRoot -ChildPath Users\Default\NTUSER.DAT) `
+                       -Description "Default Profile Registry"
+        
+        New-PSDriveObj -Name "$($ImageRootName)_REG_DEF_CLS" `
+                       -PSProvider Registry `
+                       -Root (Join-Path -Path $ImageRoot -ChildPath Users\Default\AppData\Local\Microsoft\Windows\UsrClass.dat) `
+                       -Description "Default Profile Classes Registry"
+      )
+
+      foreach ($drive in $drives) {
+        if (-not (Test-Path -LiteralPath $drive.Root)) {
+          continue
+        }
+      
+        if ($drive.PSProvider -eq "Registry") {
+          & reg load "HKLM\$($drive.Name)" $drive.Root |
+            Out-Null
+      
+          $drive.Root = "HKLM:\$($drive.Name)"
+        }
+      
+        New-PSDrive -Name $drive.Name `
+                    -PSProvider $drive.PSProvider `
+                    -Root $drive.Root `
+                    -Description $drive.Description |
+          Out-Null
+      }
     }
 
     $pl = $Host.Runspace.CreateNestedPipeline()
@@ -1688,6 +2069,26 @@ function Invoke-StartVMAction_Custom {
     $pl.Commands.Add($cmd)
     $pl.Commands.AddScript($Action.Script)
     $pl.Invoke() | Out-Null
+
+    if ($Action.OfflineServicing -eq 'true') {
+      # Mandatory before registry unload.
+      [System.GC]::Collect()
+      
+      foreach ($drive in $drives) {
+        if ((Get-PSDrive | where-Object Name -eq $drive.Name) -eq $null) {
+          continue
+        }
+      
+        Remove-PSDrive -Name $drive.Name
+      
+        if ($drive.PSProvider -eq "Registry") {
+          & reg unload "HKLM\$($drive.Name)" |
+            Out-Null
+        }
+      }
+
+      Dismount-VHD -Path $vhdPath
+    }
   }
 }
 
@@ -1702,6 +2103,12 @@ function Invoke-StartVMAction_Start {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -1758,6 +2165,12 @@ function Invoke-StartVMAction_Inject {
     [Parameter(
       Mandatory = $true
     )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
     [PSCustomObject]
     $RuntimeConfig
   )
@@ -1769,7 +2182,7 @@ function Invoke-StartVMAction_Inject {
     }
 
     $credential = [System.Management.Automation.PSCredential]::new(
-      $Action.Credential.UserName,
+      "$($Action.Credential.Domain)\$($Action.Credential.UserName)",
       (ConvertTo-SecureString -String $Action.Credential.Password -AsPlainText -Force)
     )
 
@@ -1792,8 +2205,8 @@ function Invoke-StartVMAction_Inject {
     if ($Action.UsePhysHostName -eq 'true') {
       $injectParams.PhysHostName = $RuntimeConfig.PhysHostName
     }
-    if ($Action.UseResourceServer -eq 'true') {
-      $injectParams.PreferLocalPackages = $Action.SelectNodes("Packages/Package").Count -gt 0
+
+    if ($Action.UseResourceServer -eq 'true' -and $ToolsetConfig.Resources.ApplyMode -eq "Online") {
       $injectParams.ResourceServer = $RuntimeConfig.ResourceServer
     }
 
@@ -1809,14 +2222,34 @@ function Invoke-StartVMAction_Inject {
       Out-Null
 
     if ($Action.UseResourceServer -eq 'true') {
-      Write-Verbose "  - Initializing modules and package source in vm session."
-      Invoke-Command -Session $session -ScriptBlock $resources.InjectScripts.InitResources |
+      Invoke-Command -Session $session -ScriptBlock $resources.InjectScripts.InitLocalPaths |
         Out-Null
+
+      if ($ToolsetConfig.Resources.ApplyMode -eq "Online") {
+        Write-Verbose "  - Initializing modules and package source in vm session."
+        Invoke-Command -Session $session -ScriptBlock $resources.InjectScripts.InitOnlineResources |
+          Out-Null
+
+        Write-Verbose "  - Copying package content from remote source."
+        $Action.SelectNodes("Packages/Package") |
+          ForEach-Object InnerXml |
+          ForEach-Object {
+            Invoke-Command -Session $session -ScriptBlock {
+              Find-CTPackage $args[0] -Source Remote |
+                Copy-CTPackage
+            } -ArgumentList $_ |
+              Out-Null
+          }
+      } elseif ($ToolsetConfig.Resources.ApplyMode -eq "Offline") {
+        Write-Verbose "  - Initializing modules and package source in vm session."
+        Invoke-Command -Session $session -ScriptBlock $resources.InjectScripts.InitOfflineResources |
+          Out-Null
+      }
     }
 
     $context = $Action.SelectSingleNode("../..").Context
 
-    if ($context -eq "Start") {
+    if ($context -in "Start","Custom") {
       Invoke-Command -Session $session -ScriptBlock $resources.InjectScripts.RunAsUser | 
         Out-Null
     }
@@ -1835,6 +2268,35 @@ function Invoke-StartVMAction_Inject {
   }
 }
 
+function Invoke-StartVMAction_Wait {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+    Start-Sleep -Seconds $Action.Seconds
+  }
+}
+
 function Invoke-StartVMAction_ConfigRdp {
   [CmdletBinding(
     PositionalBinding = $false
@@ -1846,6 +2308,12 @@ function Invoke-StartVMAction_ConfigRdp {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -1995,6 +2463,12 @@ function Invoke-StartVMAction_Connect {
     [Parameter(
       Mandatory = $true
     )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
     [PSCustomObject]
     $RuntimeConfig
   )
@@ -2005,7 +2479,7 @@ function Invoke-StartVMAction_Connect {
       throw "This action requires the vm be in a 'Running' state."
     }
 
-    Start-CTVMConnect -VM $vm
+    Start-CTVMConnect -MaximizedVM $vm
   }
 }
 
@@ -2020,6 +2494,12 @@ function Invoke-StartVMAction_Stop {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -2053,6 +2533,12 @@ function Invoke-StartVMAction_SaveIfNeeded {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -2091,6 +2577,12 @@ function Invoke-StartVMAction_TakeCheckpoint {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -2170,6 +2662,12 @@ function Invoke-StartVMAction_ReplaceCheckpoint {
     [Parameter(
       Mandatory = $true
     )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
     [PSCustomObject]
     $RuntimeConfig
   )
@@ -2199,6 +2697,91 @@ function Invoke-StartVMAction_ReplaceCheckpoint {
   }
 }
 
+function Invoke-StartVMAction_ApplyOffline {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true,
+      ValueFromPipeline = $true
+    )]
+    [System.Xml.XmlElement]
+    $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [PSCustomObject]
+    $RuntimeConfig
+  )
+  process {
+    $vm = Get-VM -Id $Action.VMId
+
+    if ($vm.State -ne "Off") {
+      throw "This action requires the vm be in an 'Off' state."
+    }
+
+    $vhdPath = $vm |
+                 Get-VMHardDiskDrive |
+                 Select-Object -First 1 |
+                 ForEach-Object Path
+
+    $partition = Mount-VHD -Path $vhdPath -Passthru |
+                   Get-Partition |
+                   Where-Object Size -gt 1gb
+
+    $volumeRoot = $partition |
+                    ForEach-Object {$_.DriveLetter + ":\"}
+
+    do {
+      Start-Sleep -Milliseconds 250
+    } until ((Get-PSDrive | Where-Object Root -eq $volumeRoot) -ne $null)
+
+    $vhdPaths = @{
+      CTRoot = Join-Path -Path $volumeRoot -ChildPath CT
+    }
+    $vhdPaths.Modules = Join-Path -Path $vhdPaths.CTRoot -ChildPath Modules
+    $vhdPaths.Packages = Join-Path -Path $vhdPaths.CTRoot -ChildPath Packages
+
+    if (Test-Path -LiteralPath $vhdPaths.CTRoot) {
+      throw "The resource destination path already exists @ '$($vhdPaths.CTRoot)' on the vhd. Any successful configuration should have removed this path."
+    }
+
+    New-Item -Path $vhdPaths.Modules -ItemType Directory -Force |
+      Out-Null
+
+    "Common",
+    "CTPackage" |
+      ForEach-Object {
+        Copy-Item -LiteralPath (Join-Path -Path $ToolsetConfig.Resources.Offline.ModulesSourcePath -ChildPath $_) -Destination $vhdPaths.Modules -Recurse
+      }
+
+    $packages = @(
+      $Action.SelectNodes("Packages/Package") |
+        ForEach-Object InnerXml
+    )
+
+    if ($packages.Count -gt 0) {
+      New-Item -Path $vhdPaths.Packages -ItemType Directory |
+        Out-Null
+
+      $packages |
+        ForEach-Object {
+          Copy-Item -LiteralPath (Join-Path -Path $ToolsetConfig.Resources.Offline.PackagesSourcePath -ChildPath $_) -Destination $vhdPaths.Packages -Recurse
+        }
+    }
+
+    Dismount-VHD -Path $vhdPath
+  }
+}
+
 function Invoke-StartVMAction {
   [CmdletBinding(
     PositionalBinding = $false
@@ -2210,6 +2793,12 @@ function Invoke-StartVMAction {
     )]
     [System.Xml.XmlElement]
     $Action,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [System.Xml.XmlElement]
+    $ToolsetConfig,
 
     [Parameter(
       Mandatory = $true
@@ -2228,7 +2817,7 @@ function Invoke-StartVMAction {
 
       Write-Verbose "Invoking action '$type'$msgAug."
       $Action |
-        & "Invoke-StartVMAction_$type" -RuntimeConfig $RuntimeConfig -ErrorAction Stop
+        & "Invoke-StartVMAction_$type" -ToolsetConfig $ToolsetConfig -RuntimeConfig $RuntimeConfig -ErrorAction Stop
     } catch {
       $PSCmdlet.ThrowTerminatingError($_)
     }
@@ -2373,7 +2962,8 @@ function Invoke-StartVM {
       "Test",
       "Save",
       "Restore",
-      "Update"
+      "Update",
+      "Custom"
     )]
     [String]
     $Context
@@ -2470,6 +3060,7 @@ function Invoke-StartVM {
     # simply returned to the caller.
     Invoke-StartVMActionsTransform_AutoConfigHw    -ActionSet $ActionSet -ToolsetConfig $ToolsetConfig -RuntimeConfig $RuntimeConfig
     Invoke-StartVMActionsTransform_RunUpdateAsTest -ActionSet $ActionSet -ToolsetConfig $ToolsetConfig -RuntimeConfig $RuntimeConfig
+    Invoke-StartVMActionsTransform_ApplyOffline    -ActionSet $ActionSet -ToolsetConfig $ToolsetConfig -RuntimeConfig $RuntimeConfig
 
     $resultObj."Resolved Actions Configuration" = $ActionSet
 
@@ -2504,7 +3095,7 @@ function Invoke-StartVM {
     $resultObj."Processing Status" = "Orchestrating actions."
 
     $ActionSet.SelectNodes("Actions/Action") |
-      Invoke-StartVMAction -RuntimeConfig $RuntimeConfig
+      Invoke-StartVMAction -ToolsetConfig $ToolsetConfig -RuntimeConfig $RuntimeConfig
 
     Write-StartVMPersistentData `
     -Path $PersistentDataPath `

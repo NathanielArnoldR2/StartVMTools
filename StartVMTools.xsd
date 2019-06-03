@@ -73,8 +73,9 @@
   either work, or they won't.
   -->
   <xs:complexType name="Credential_Type">
-      <xs:attribute name="UserName" use="required" type="string_notEmpty" />
-      <xs:attribute name="Password" use="required" type="string_notEmpty" /> 
+    <xs:attribute name="Domain" use="required" type="string_notEmpty" />
+    <xs:attribute name="UserName" use="required" type="string_notEmpty" />
+    <xs:attribute name="Password" use="required" type="string_notEmpty" /> 
   </xs:complexType>
 
   <!-- MEMBERS & RELATED DEFINITIONS -->
@@ -121,6 +122,7 @@
           <xs:enumeration value="Save" />
           <xs:enumeration value="Restore" />
           <xs:enumeration value="Update" />
+          <xs:enumeration value="Custom" />
         </xs:restriction>
       </xs:simpleType>
     </xs:attribute>
@@ -227,7 +229,13 @@
           - Difficult/Impossible to validate.
           -->
           <xs:element name="Script" type="xs:string" />
-        </xs:sequence>
+          <!--
+          DEFAULT:
+            - Via PowerShell configuration command, 'false', as 'true' will
+              require script be run as administrator.
+          -->
+          <xs:element name="OfflineServicing" type="xs:boolean" />
+      </xs:sequence>
       </xs:extension>
     </xs:complexContent>
   </xs:complexType>
@@ -295,6 +303,16 @@
     </xs:complexContent>
   </xs:complexType>
 
+  <xs:complexType name="WaitAction">
+    <xs:complexContent>
+      <xs:extension base="Action_Type">
+        <xs:sequence>
+          <xs:element name="Seconds" type="xs:unsignedByte"/>
+        </xs:sequence>
+      </xs:extension>
+    </xs:complexContent>
+  </xs:complexType>
+
   <xs:complexType name="ConfigRdpAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type">
@@ -336,6 +354,27 @@
   <xs:complexType name="ReplaceCheckpointAction">
     <xs:complexContent>
       <xs:extension base="ActionSingleTarget_Type" />
+    </xs:complexContent>
+  </xs:complexType>
+
+  <!--
+    IMPORTANT: This action type is not meant for direct use, but is applied via
+    transform when an InjectAction uses the resource server when ToolsetConfig.
+    Resources.ApplyMode -eq "Offline"
+  -->
+  <xs:complexType name="ApplyOfflineAction">
+    <xs:complexContent>
+      <xs:extension base="ActionSingleTarget_Type">
+        <xs:sequence>
+          <xs:element name="Packages">
+            <xs:complexType>
+              <xs:sequence>
+                <xs:element name="Package" type="string_notEmpty" minOccurs="0" maxOccurs="6" />
+              </xs:sequence>
+            </xs:complexType>
+          </xs:element>
+        </xs:sequence>
+      </xs:extension>
     </xs:complexContent>
   </xs:complexType>
 </xs:schema>

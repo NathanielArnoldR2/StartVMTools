@@ -55,14 +55,15 @@
         <xs:element name="IgnoreList">
           <xs:complexType>
             <xs:sequence>
-              <xs:element name="IgnoreListItem" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+              <xs:element name="IgnoreListItem" minOccurs="0" maxOccurs="3" type="string_notEmpty" />
             </xs:sequence>
           </xs:complexType>
         </xs:element>
         <!--
         DEFAULT:
-          - 'false'. The actual host computer host name is truncated if needed
-            and passed to the VM for interior configuration.
+          - Via PowerShell configuration cmdlet, 'false'. The actual host
+            computer host name is truncated if needed and passed to the
+            VM for interior configuration.
         VALIDITY:
           - The default 'false', of course.
           - 'true', indicating the console user should be prompted for a valid
@@ -72,22 +73,74 @@
             host name.
         -->
         <xs:element name="PhysHostNameOverride" type="string_notEmpty" />
-        <!--
-        VALIDITY:
-          - Each item is validated as an IPv4 address or computer name.
-        -->
-        <xs:element name="ResourceServerOptions">
+        <xs:element name="Resources">
           <xs:complexType>
             <xs:sequence>
-              <xs:element name="ResourceServerOption" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+              <!--
+              DEFAULT:
+                - Via PowerShell configuration cmdlet, 'Online'. Modules and
+                  packages are pulled from a resource server on the network
+                  by the configuration target os when it is online. Requires
+                  "Hyper-V Administrator" rights to the host.
+              VALIDITY:
+                - The default 'Online', of course.
+                - 'Offline', indicating that modules and packages are pulled
+                  from a local or network path by the *host* os and applied
+                  to the configuration target os vhd when it is offline.
+                  Requires (elevated) "Administrator" rights to both the
+                  host and guest.
+              -->
+              <xs:element name="ApplyMode">
+                <xs:simpleType>
+                  <xs:restriction base="xs:string">
+                    <xs:enumeration value="Online" />
+                    <xs:enumeration value="Offline" />
+                  </xs:restriction>
+                </xs:simpleType>
+              </xs:element>
+              <xs:element name="Online">
+                <xs:complexType>
+                  <xs:sequence>
+                    <!--
+                    VALIDITY:
+                      - Each item is validated as an IPv4 address or computer name.
+                    -->
+                    <xs:element name="ServerOptions">
+                      <xs:complexType>
+                        <xs:sequence>
+                          <xs:element name="ServerOption" minOccurs="0" maxOccurs="2" type="string_notEmpty" />
+                        </xs:sequence>
+                      </xs:complexType>
+                    </xs:element>
+                    <!--
+                      DEFAULT:
+                        - Via PowerShell configuration cmdlet, 'true'.
+                     -->
+                    <xs:element name="TestShares" type="xs:boolean" />                    
+                  </xs:sequence>
+                </xs:complexType>
+              </xs:element>
+              <xs:element name="Offline">
+                <xs:complexType>
+                  <xs:sequence>
+                    <!--
+                    VALIDITY:
+                      - An empty string, -PROVIDED- ApplyMode is not Offline.
+                      - A valid filesystem path on a local volume or remote share.
+                    -->
+                    <xs:element name="ModulesSourcePath" type="xs:string" />
+                    <!--
+                    VALIDITY:
+                      - An empty string, -PROVIDED- ApplyMode is not Offline.
+                      - A valid filesystem path on a local volume or remote share.
+                    -->
+                    <xs:element name="PackagesSourcePath" type="xs:string" />
+                  </xs:sequence>
+                </xs:complexType>
+              </xs:element>
             </xs:sequence>
           </xs:complexType>
         </xs:element>
-        <!--
-        DEFAULT:
-          - Via PowerShell configuration cmdlet, 'true'.
-        -->
-        <xs:element name="TestResourceShares" type="xs:boolean" />
         <!--
         DEFAULT:
           - Via PowerShell configuration cmdlet, 'true'. The controlling script

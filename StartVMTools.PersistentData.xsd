@@ -21,6 +21,7 @@
               <xs:enumeration value="Save" />
               <xs:enumeration value="Restore" />
               <xs:enumeration value="Update" />
+              <xs:enumeration value="Custom" />
             </xs:restriction>
           </xs:simpleType>
         </xs:element>

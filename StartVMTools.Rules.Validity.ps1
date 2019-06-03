@@ -74,7 +74,7 @@ $configRdpNullables = {
 rule -Individual /Configuration/Name $constrainedString @{
   Pattern   = "^[A-Za-z0-9 ]+$"
   MinLength = 1
-  MaxLength = 20
+  MaxLength = 27
 }
 
 #region /Configuration/Members
@@ -222,7 +222,7 @@ rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='
      -Params @{
   Pattern   = "^[A-Za-z0-9 ]+$"
   MinLength = 3
-  MaxLength = 13
+  MaxLength = 14
 }
 
 # -- VALIDATE Inject Action
@@ -244,6 +244,7 @@ rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='
   MaxLength = 30
 }
 
+# -- VALIDATE ConfigHw Action
 rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='ConfigHwAction']/ProcessorCount" `
      -Script {
   # Via schema, already validated as unsigned byte; for validity, then, we
@@ -266,6 +267,17 @@ rule -Individual "Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='C
   MaxLength = 20
 }
 
+# -- VALIDATE Wait Action
+rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='WaitAction']/Seconds" `
+     -Script {
+  # Via schema, already validated as unsigned byte; for validity, then, we
+  # need only make sure it's -gt 0.
+  if ([int]$nodeValue -eq 0) {
+    throw "Seconds must be greater than 0."
+  }
+}
+
+# -- VALIDATE TakeCheckpoint Action
 rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='TakeCheckpointAction']/CheckpointName" `
      -PrereqScript {
   $nodeValue.Length -gt 0
@@ -275,6 +287,13 @@ rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='
   Pattern   = "^[A-Za-z0-9 ]+$"
   MinLength = 3
   MaxLength = 13
+}
+
+# -- VALIDATE ApplyOffline Action (should only be applied via transformation of Inject action)
+rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='ApplyOfflineAction']/Packages/Package" $constrainedString @{
+  Pattern   = "^[A-Za-z0-9 .\-+()]+$"
+  MinLength = 1
+  MaxLength = 30
 }
 
 rule -Individual "/Configuration/ActionSets/ActionSet/Actions/Action[@xsi:type='ConfigRdpAction']/RedirectAudio" $configRdpNullables
@@ -305,6 +324,7 @@ rule -Aggregate "/Configuration/ActionSets/ActionSet[$i_actionSet]/Actions/Actio
 
 rule -Aggregate "/Configuration/ActionSets/ActionSet[$i_actionSet]/Actions/Action[$i_action][@xsi:type='InjectAction']/Packages/Package" $uniqueness
 
+rule -Aggregate "/Configuration/ActionSets/ActionSet[$i_actionSet]/Actions/Action[$i_action][@xsi:type='ApplyOfflineAction']/Packages/Package" $uniqueness
 }
 }
 
@@ -496,6 +516,32 @@ rule -Individual /Configuration/ActionSets/ActionSet {
 
     if ($actions[$actions.Count - 1].type -ne "ReplaceCheckpointAction") {
       throw "The last action of an 'Update' context actionset must be a ReplaceCheckpoint action."
+    }
+  }
+
+  if ($node.Context -eq "Custom") {
+    $allowedTypes = @(
+      "RestoreCheckpointAction"
+      "ConfigHwAction"
+      "CustomAction"
+      "StartAction"
+      "InjectAction"
+      "WaitAction"
+      "StopAction"
+      "ConnectAction"
+    )
+
+    $badActions = @(
+      $actions |
+        Where-Object type -notin $allowedTypes
+    )
+
+    if ($badActions.Count -gt 0) {
+      throw "The 'Update' actionset contained one or more actions of a type inappropriate for its context."
+    }
+
+    if ($actions[0].type -ne "RestoreCheckpointAction") {
+      throw "The first action of a 'Config' context actionset must be a RestoreCheckpoint action."
     }
   }
 }

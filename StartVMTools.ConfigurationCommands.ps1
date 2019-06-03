@@ -126,6 +126,10 @@ function New-StartVMMember {
 
     [ValidateNotNullOrEmpty()]
     [string]
+    $Domain,
+
+    [ValidateNotNullOrEmpty()]
+    [string]
     $UserName,
 
     [ValidateNotNullOrEmpty()]
@@ -137,6 +141,7 @@ function New-StartVMMember {
     PSTypeName = "StartVMMember"
     Name       = $Name
     Required   = -not $Optional # Implicit cast to [bool].
+    Domain     = $Domain
     UserName   = $UserName
     Password   = $Password
   }
@@ -182,6 +187,7 @@ function Add-StartVMMember {
     $memberNode.SetAttribute("Required", $MemberItem.Required.ToString().ToLower())
 
     if (
+      $MemberItem.Domain.Length -gt 0 -or
       $MemberItem.UserName.Length -gt 0 -or
       $MemberItem.Password.Length -gt 0
     ) {
@@ -191,6 +197,11 @@ function Add-StartVMMember {
         CreateElement("Credential")
       )
 
+      if ($MemberItem.Domain.Length -gt 0) {
+        $credNode.SetAttribute("Domain", $MemberItem.Domain)
+      } else {
+        $credNode.SetAttribute("Domain", ".")
+      }
       $credNode.SetAttribute("UserName", $MemberItem.UserName)
       $credNode.SetAttribute("Password", $MemberItem.Password)
     }
@@ -238,7 +249,8 @@ function Add-StartVMActionSet {
       "Test",
       "Save",
       "Restore",
-      "Update"
+      "Update",
+      "Custom"
     )]
     [string]
     $Context,
@@ -511,13 +523,17 @@ function New-StartVMCustomAction {
     )]
     [ValidateNotNullOrEmpty()]
     [string]
-    $Script
+    $Script,
+
+    [switch]
+    $OfflineServicing
   )
   [PSCustomObject]@{
-    PSTypeName        = "StartVMAction"
-    Type              = "CustomAction"
-    Target            = $Target
-    Script            = $Script
+    PSTypeName       = "StartVMAction"
+    Type             = "CustomAction"
+    Target           = $Target
+    Script           = $Script
+    OfflineServicing = [bool]$OfflineServicing
   }
 }
 New-Alias -Name act_custom -Value New-StartVMCustomAction
@@ -580,6 +596,10 @@ function New-StartVMInjectAction {
 
     [ValidateNotNullOrEmpty()]
     [string]
+    $Domain,
+
+    [ValidateNotNullOrEmpty()]
+    [string]
     $UserName,
 
     [ValidateNotNullOrEmpty()]
@@ -595,6 +615,7 @@ function New-StartVMInjectAction {
     WaitForKvp        = [bool]$WaitForKvp
     UseResourceServer = $null
     Packages          = $Packages
+    Domain            = $Domain
     UserName          = $UserName
     Password          = $Password
   }
@@ -606,6 +627,26 @@ function New-StartVMInjectAction {
   [PSCustomObject]$outHash
 }
 New-Alias -Name act_inject -Value New-StartVMInjectAction
+
+function New-StartVMWaitAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [byte]
+    $Seconds
+  )
+
+  [PSCustomObject]@{
+    PSTypeName = "StartVMAction"
+    Type       = "WaitAction"
+    Seconds    = $Seconds
+  }
+}
+New-Alias -Name act_wait -Value New-StartVMWaitAction
 
 function New-StartVMConfigRdpAction {
   [CmdletBinding(
@@ -759,6 +800,32 @@ function New-StartVMReplaceCheckpointAction {
   }
 }
 New-Alias -Name act_replaceCheckpoint -Value New-StartVMReplaceCheckpointAction
+
+function New-StartVMApplyOfflineAction {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [Parameter(
+      Position = 0
+    )]
+    [ValidateNotNullOrEmpty()]
+    [string]
+    $Target,
+
+    [ValidateNotNullOrEmpty()]
+    [string[]]
+    $Packages = [string[]]@()
+  )
+  [PSCustomObject]@{
+    PSTypeName        = "StartVMAction"
+    Type              = "ApplyOfflineAction"
+    Target            = $Target
+    Packages          = $Packages
+  }
+}
+New-Alias -Name act_applyOffline -Value New-StartVMApplyOfflineAction
+
 function Add-StartVMAction {
   [CmdletBinding(
     PositionalBinding = $false
@@ -871,6 +938,7 @@ function Add-StartVMAction_Inject ($Node, $Item) {
   }
 
   if (
+    $Item.Domain.Length -gt 0 -or
     $Item.UserName.Length -gt 0 -or
     $Item.Password.Length -gt 0
   ) {
@@ -880,9 +948,21 @@ function Add-StartVMAction_Inject ($Node, $Item) {
       CreateElement("Credential")
     )
 
+    if ($Item.Domain.Length -gt 0) {
+      $credNode.SetAttribute("Domain", $Item.Domain)
+    } else {
+      $credNode.SetAttribute("Domain", ".")
+    }
     $credNode.SetAttribute("UserName", $Item.UserName)
     $credNode.SetAttribute("Password", $Item.Password)
   }
+}
+function Add-StartVMAction_Wait ($Node, $Item) {
+  $Node.AppendChild(
+    $Node.
+    OwnerDocument.
+    CreateElement("Seconds")
+  ).InnerText = $Item.Seconds
 }
 function Add-StartVMAction_Custom ($Node, $Item) {
   $Node.AppendChild(
@@ -890,6 +970,12 @@ function Add-StartVMAction_Custom ($Node, $Item) {
     OwnerDocument.
     CreateElement("Script")
   ).InnerText = $Item.Script
+
+  $Node.AppendChild(
+    $Node.
+    OwnerDocument.
+    CreateElement("OfflineServicing")
+  ).InnerText = $Item.OfflineServicing.ToString().ToLower()
 }
 function Add-StartVMAction_ConfigHw ($Node, $Item) {
   if ($null -ne $Item.ProcessorCount) {
@@ -961,6 +1047,21 @@ function Add-StartVMAction_ConfigRdp ($Node, $Item) {
   }
   if ($Item.RedirectMicrophone -is [bool]) {
     $micNode.InnerText = $Item.RedirectMicrophone.ToString().ToLower()
+  }
+}
+function Add-StartVMAction_ApplyOffline ($Node, $Item) {
+  $packagesNode = $Node.AppendChild(
+    $Node.
+    OwnerDocument.
+    CreateElement("Packages")
+  )
+
+  foreach ($package in $Item.Packages) {
+    $packagesNode.AppendChild(
+      $Node.
+      OwnerDocument.
+      CreateElement("Package")
+    ).InnerText = $package
   }
 }
 #endregion

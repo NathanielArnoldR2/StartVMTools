@@ -37,6 +37,45 @@ $uniqueness = {
   }
 }
 
+$offlineSourcePath = {
+  $applyMode = $node.SelectSingleNode("../..").ApplyMode
+
+  if ($nodeValue.Length -eq 0) {
+    return
+  }
+
+  #if ($nodeValue.Length -eq 0) {
+  #  throw "Offline source paths for Modules and Packages must be specified when the resource apply mode is 'Offline'."
+  #}
+
+  if (-not (Test-StartVMOfflineSourcePath -Path $nodeValue)) {
+    throw "Offline source paths for Modules and Packages must be rooted, direct paths to existing directories on a local volume or network share."
+  }
+}
+
+function Test-StartVMOfflineSourcePath {
+  param(
+    [Parameter(
+      Mandatory = $true
+    )]
+    [string]
+    $Path
+  )
+  try {
+    if ($Path -notmatch "^[A-Z]:\\" -and $Path -notmatch "^\\\\") {
+      return $false
+    }
+
+    if (-not (Test-Path -LiteralPath $Path -IsValid -ErrorAction Stop)) {
+      return $false
+    }
+
+    return $true
+  } catch {
+    $PSCmdlet.ThrowTerminatingError($_)
+  }
+}
+
 rule -Individual /Configuration/DefaultMemberOptions/DefaultMemberOption $constrainedString @{
   Pattern   = "^[A-Za-z0-9 .\-+()]+$"
   MinLength = 1
@@ -65,7 +104,7 @@ rule -Individual /Configuration/PhysHostNameOverride {
   }
 }
 
-rule -Individual /Configuration/ResourceServerOptions/ResourceServerOption {
+rule -Individual /Configuration/Resources/Online/ServerOptions/ServerOption {
   if (Test-StartVMIsValidComputerName -Name $nodeValue) {
     return
   }
@@ -80,4 +119,8 @@ rule -Individual /Configuration/ResourceServerOptions/ResourceServerOption {
 
   throw "Each ResourceServerOption must be a valid computer name or ipv4 address."
 }
-rule -Aggregate /Configuration/ResourceServerOptions/ResourceServerOption $uniqueness
+rule -Aggregate /Configuration/Resources/Online/ServerOptions/ServerOption $uniqueness
+
+rule -Individual /Configuration/Resources/Offline/ModulesSourcePath $offlineSourcePath
+
+rule -Individual /Configuration/Resources/Offline/PackagesSourcePath $offlineSourcePath

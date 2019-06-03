@@ -19,7 +19,8 @@ function New-StartVMPersistentData {
       "Test",
       "Save",
       "Restore",
-      "Update"
+      "Update",
+      "Custom"
     )]
     [string]
     $LastActionSetContext,

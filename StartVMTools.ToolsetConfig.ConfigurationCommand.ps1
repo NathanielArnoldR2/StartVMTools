@@ -18,15 +18,76 @@ function New-StartVMToolsetConfiguration {
     [string]
     $PhysHostNameOverride = $false,
 
-    [string[]]
-    $ResourceServerOptions = [string[]]@(),
-
-    [bool]
-    $TestResourceShares = $true,
+    [Parameter(
+      Mandatory = $true
+    )]
+    [hashtable]
+    $Resources,
 
     [bool]
     $AutoExit = $true
   )
+
+#region Component Functions
+function cmp_Resources {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [string]
+    $ApplyMode = "Online",
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [hashtable]
+    $Online,
+
+    [Parameter(
+      Mandatory = $true
+    )]
+    [hashtable]
+    $Offline
+  )
+  [PSCustomObject]@{
+    ApplyMode = $ApplyMode
+    Online    = cmp_Resources_Online @Online
+    Offline   = cmp_Resources_Offline @Offline
+  }
+}
+function cmp_Resources_Online {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [string[]]
+    $ServerOptions = [string[]]@(),
+
+    [bool]
+    $TestShares = $true
+  )
+  [PSCustomObject]@{
+    ServerOptions = $ServerOptions
+    TestShares    = $TestShares
+  }
+}
+function cmp_Resources_Offline {
+  [CmdletBinding(
+    PositionalBinding = $false
+  )]
+  param(
+    [string]
+    $ModulesSourcePath = [string]::Empty,
+
+    [string]
+    $PackagesSourcePath = [string]::Empty
+  )
+  [PSCustomObject]@{
+    ModulesSourcePath  = $ModulesSourcePath
+    PackagesSourcePath = $PackagesSourcePath
+  }
+}
+#endregion
 
   $xml = [System.Xml.XmlDocument]::new()
 
@@ -70,19 +131,45 @@ function New-StartVMToolsetConfiguration {
     $xml.CreateElement("PhysHostNameOverride")
   ).InnerXml = $PhysHostNameOverride
 
-  $node = $cfg.AppendChild(
-    $xml.CreateElement("ResourceServerOptions")
+  $resourcesObj = cmp_Resources @Resources
+
+  $resourcesNode = $cfg.AppendChild(
+    $xml.CreateElement("Resources")
   )
 
-  foreach ($option in $ResourceServerOptions) {
-    $node.AppendChild(
-      $xml.CreateElement("ResourceServerOption")
+  $resourcesNode.AppendChild(
+    $xml.CreateElement("ApplyMode")
+  ).InnerXml = $resourcesObj.ApplyMode
+
+  $onlineNode = $resourcesNode.AppendChild(
+    $xml.CreateElement("Online")
+  )
+
+  $optionsNode = $onlineNode.AppendChild(
+    $xml.CreateElement("ServerOptions")
+  )
+
+  foreach ($option in $resourcesObj.Online.ServerOptions) {
+    $optionsNode.AppendChild(
+      $xml.CreateElement("ServerOption")
     ).InnerXml = $option
   }
 
-  $cfg.AppendChild(
-    $xml.CreateElement("TestResourceShares")
-  ).InnerXml = $TestResourceShares.ToString().ToLower()
+  $onlineNode.AppendChild(
+    $xml.CreateElement("TestShares")
+  ).InnerXml = $resourcesObj.Online.TestShares.ToString().ToLower()
+
+  $offlineNode = $resourcesNode.AppendChild(
+    $xml.CreateElement("Offline")
+  )
+
+  $offlineNode.AppendChild(
+    $xml.CreateElement("ModulesSourcePath")
+  ).InnerXml = $resourcesObj.Offline.ModulesSourcePath
+
+  $offlineNode.AppendChild(
+    $xml.CreateElement("PackagesSourcePath")
+  ).InnerXml = $resourcesObj.Offline.PackagesSourcePath
 
   $cfg.AppendChild(
     $xml.CreateElement("AutoExit")
